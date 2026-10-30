@@ -14,6 +14,7 @@ const { default: axios } = require('axios'); // Http request library
 const jsonExplorer = require('iobroker-jsonexplorer'); // Use jsonExplorer library
 const convert = require('./lib/converter'); // Load converter functions
 const stateAttr = require(`${__dirname}/lib/state_attr.js`); // Load attribute library
+const bambuCloud = require('./lib/bambu-cloud'); // LAN vs. Cloud MQTT (Fork)
 
 let client; // Memory to store client connection information
 const clientConnection = {
@@ -64,14 +65,26 @@ class Bambulab extends utils.Adapter {
         // Download / Update HMS error Codes
         await this.loadHMSErrorCodeTranslations();
 
-        // Handle MQTT messages
-        this.mqttMessageHandle();
+        // Handle MQTT messages (async: Cloud braucht vorher Login)
+        this.mqttMessageHandle().catch(err => {
+            this.log.error(`MQTT setup failed: ${err.message || err}`);
+            clientConnection.initiated = false;
+            clientConnection.connectError = true;
+        });
+    }
+
+    /**
+     * Baut MQTT-URL und Optionen – LAN (Drucker) oder Cloud (Bambu-Konto).
+     */
+    async resolveMqttConnect() {
+        const logFn = (level, msg) => this.log[level](msg);
+        return bambuCloud.buildMqttConnect(this.config, logFn);
     }
 
     /**
      * Handle MQTT connection & message
      */
-    mqttMessageHandle() {
+    async mqttMessageHandle() {
         try {
             // Prevent multiple concurrent connection attempts
             if (clientConnection.initiated) {
@@ -102,13 +115,14 @@ class Bambulab extends utils.Adapter {
                 client = null;
             }
 
-            // Connect to Printer using MQTT
-            client = mqtt.connect(`mqtts://${this.config.host}:8883`, {
-                username: 'bblp',
-                password: this.config.Password,
-                reconnectPeriod: 30,
-                rejectUnauthorized: false,
-            });
+            const connect = await this.resolveMqttConnect();
+            const mode = this.config.connectionMode || 'lan';
+            this.log.info(
+                `MQTT ${mode === 'cloud' ? 'Cloud' : 'LAN'} → ${connect.url.replace(/\/\/.*@/, '//')}`,
+            );
+
+            // Connect to printer (LAN) or Bambu cloud broker
+            client = mqtt.connect(connect.url, connect.options);
 
             // Establish connection to printer by MQTT
             client.on('connect', () => {
@@ -195,7 +209,10 @@ class Bambulab extends utils.Adapter {
                 }
                 timeouts[this.config.serial] = this.setTimeout(() => {
                     // Create a new MQTT connection instead of reconnecting the ended client
-                    this.mqttMessageHandle();
+                    this.mqttMessageHandle().catch(err => {
+                        this.log.error(`MQTT reconnect failed: ${err.message || err}`);
+                        clientConnection.initiated = false;
+                    });
                 }, 30000);
                 clientConnection.connected = false;
                 clientConnection.connectError = true;

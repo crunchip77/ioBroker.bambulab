@@ -2,6 +2,22 @@
     "i18n": true,
     "type": "panel",
     "items": {
+        "connectionMode": {
+            "type": "select",
+            "label": "Connection mode",
+            "newLine": true,
+            "xs": 12,
+            "sm": 12,
+            "md": 6,
+            "lg": 4,
+            "xl": 4,
+            "default": "lan",
+            "options": [
+                { "label": "LAN (local MQTT at printer IP)", "value": "lan" },
+                { "label": "Cloud (Bambu account MQTT)", "value": "cloud" }
+            ],
+            "help": "LAN needs printer IP and LAN access token. Cloud uses your Bambu account (experimental in this fork)."
+        },
         "host": {
             "type": "text",
             "label": "Printer IP address",
@@ -10,7 +26,11 @@
             "sm": 12,
             "md": 6,
             "lg": 4,
-            "xl": 4
+            "xl": 4,
+            "visible": {
+                "dependsOn": "connectionMode",
+                "value": "lan"
+            }
         },
         "Password": {
             "type": "password",
@@ -21,13 +41,80 @@
             "sm": 12,
             "md": 6,
             "lg": 4,
-            "xl": 4
+            "xl": 4,
+            "visible": {
+                "dependsOn": "connectionMode",
+                "value": "lan"
+            }
+        },
+        "cloudRegion": {
+            "type": "select",
+            "label": "Cloud region",
+            "newLine": true,
+            "xs": 12,
+            "sm": 12,
+            "md": 6,
+            "lg": 4,
+            "xl": 4,
+            "default": "global",
+            "options": [
+                { "label": "Global (EU/US)", "value": "global" },
+                { "label": "China", "value": "china" }
+            ],
+            "visible": {
+                "dependsOn": "connectionMode",
+                "value": "cloud"
+            }
+        },
+        "cloudEmail": {
+            "type": "text",
+            "label": "Bambu account (email)",
+            "newLine": true,
+            "xs": 12,
+            "sm": 12,
+            "md": 6,
+            "lg": 4,
+            "xl": 4,
+            "visible": {
+                "dependsOn": "connectionMode",
+                "value": "cloud"
+            }
+        },
+        "cloudPassword": {
+            "type": "password",
+            "label": "Bambu password",
+            "help": "Used only for login; prefer storing cloudAccessToken after first successful login",
+            "newLine": true,
+            "xs": 12,
+            "sm": 12,
+            "md": 6,
+            "lg": 4,
+            "xl": 4,
+            "visible": {
+                "dependsOn": "connectionMode",
+                "value": "cloud"
+            }
+        },
+        "cloudAccessToken": {
+            "type": "password",
+            "label": "Cloud access token (optional)",
+            "help": "If set, email/password are skipped. Token from Bambu login (~360 days validity)",
+            "newLine": true,
+            "xs": 12,
+            "sm": 12,
+            "md": 6,
+            "lg": 4,
+            "xl": 4,
+            "visible": {
+                "dependsOn": "connectionMode",
+                "value": "cloud"
+            }
         },
         "serial": {
             "type": "text",
             "label": "Serial number of device",
             "help": "Device serial number from printer network settings - required for authentication",
-            "newLine": false,
+            "newLine": true,
             "xs": 12,
             "sm": 12,
             "md": 6,
