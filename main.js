@@ -35,8 +35,11 @@ const blockedCommandsDuringPrinting = ['G0', 'G1', 'G28', 'G90', 'G91'];
 let currentPrintingState = null; // Track current printing state for safety checks
 /** Bambu-Konto-ID für Cloud-MQTT (pushall) – aus JWT nach Login */
 let cloudUserId = null;
-/** Frisch eingeloggt (E-Mail-Code) – Token erst nach MQTT-Connect in Config schreiben (sonst sofortiger Neustart) */
-let pendingCloudAccessToken = null;
+/**
+ * Frisch eingeloggt – Zugangsdaten erst nach MQTT-Connect in Config schreiben (Native-Update = Neustart).
+ * Enthält auch cloudMqttUsername/cloudUserId, weil die Preference-API nach Neustart oft 401 liefert.
+ */
+let pendingCloudCredentialSave = null;
 
 class Bambulab extends utils.Adapter {
     /**
@@ -171,8 +174,19 @@ class Bambulab extends utils.Adapter {
                 if (connect.accessToken) {
                     const stored = (this.config.cloudAccessToken || '').trim();
                     const usedVerifyCode = !!(this.config.cloudVerifyCode || '').trim();
-                    if (usedVerifyCode || connect.accessToken !== stored) {
-                        pendingCloudAccessToken = connect.accessToken;
+                    const mqttUser = connect.mqttUsername || connect.options?.username || '';
+                    const uid = connect.cloudUserId || '';
+                    const needsSave =
+                        usedVerifyCode ||
+                        connect.accessToken !== stored ||
+                        (mqttUser && mqttUser !== (this.config.cloudMqttUsername || '').trim()) ||
+                        (uid && uid !== String(this.config.cloudUserId || '').trim());
+                    if (needsSave) {
+                        pendingCloudCredentialSave = {
+                            accessToken: connect.accessToken,
+                            cloudMqttUsername: mqttUser,
+                            cloudUserId: uid,
+                        };
                     }
                 }
                 if (connect.cloudUserId) {
@@ -200,13 +214,13 @@ class Bambulab extends utils.Adapter {
                 clientConnection.reconnectMessageShown = false; // Reset for future disconnections
                 clientConnection.cloudAuthHold = false;
 
-                // Token persistent speichern (löst danach einen Neustart aus – MQTT war vorher schon OK)
-                if (pendingCloudAccessToken) {
-                    const tokenToSave = pendingCloudAccessToken;
-                    pendingCloudAccessToken = null;
-                    this.saveCloudAccessToken(tokenToSave).catch(err => {
+                // Cloud-Zugang persistent speichern (löst danach einen Neustart aus – MQTT war vorher schon OK)
+                if (pendingCloudCredentialSave) {
+                    const payload = pendingCloudCredentialSave;
+                    pendingCloudCredentialSave = null;
+                    this.saveCloudCredentials(payload).catch(err => {
                         this.log.error(
-                            `Cloud: Access Token nach Connect nicht speicherbar: ${err.message || err} – bitte Serial prüfen und erneut mit E-Mail-Code anmelden.`,
+                            `Cloud: Zugangsdaten nach Connect nicht speicherbar: ${err.message || err} – bitte Serial prüfen und erneut mit E-Mail-Code anmelden.`,
                         );
                     });
                 }
@@ -356,24 +370,36 @@ class Bambulab extends utils.Adapter {
     }
 
     /**
-     * Nach erfolgreichem Cloud-Login: JWT als cloudAccessToken speichern, Einmal-Code löschen.
-     * Warum? Der E-Mail-Code ist kurz gültig – ohne Token schlägt jeder Neustart fehl.
+     * Nach erfolgreichem Cloud-MQTT: Token + MQTT-User speichern, Einmal-Code löschen.
+     * MQTT-User mit speichern, damit nach Instanz-Neustart keine Preference-API nötig ist (die oft 401 liefert).
      */
-    async saveCloudAccessToken(accessToken) {
+    async saveCloudCredentials({ accessToken, cloudMqttUsername, cloudUserId }) {
         const token = (accessToken || '').trim();
         if (!token) {
             return;
         }
-        const hadToken = (this.config.cloudAccessToken || '').trim() === token;
-        const hadVerify = !(this.config.cloudVerifyCode || '').trim();
-        if (hadToken && hadVerify) {
+        const mqttUser = (cloudMqttUsername || '').trim();
+        const uid = cloudUserId != null ? String(cloudUserId).trim() : '';
+        const patch = { cloudAccessToken: token, cloudVerifyCode: '' };
+        if (mqttUser && /^u_\d+$/.test(mqttUser)) {
+            patch.cloudMqttUsername = mqttUser;
+        }
+        if (uid && /^\d+$/.test(uid)) {
+            patch.cloudUserId = uid;
+        }
+        const unchanged =
+            (this.config.cloudAccessToken || '').trim() === token &&
+            !(this.config.cloudVerifyCode || '').trim() &&
+            (this.config.cloudMqttUsername || '').trim() === (patch.cloudMqttUsername || '') &&
+            String(this.config.cloudUserId || '').trim() === (patch.cloudUserId || '');
+        if (unchanged) {
             return;
         }
-        await this.mergeCloudNativePatch({ cloudAccessToken: token, cloudVerifyCode: '' });
+        await this.mergeCloudNativePatch(patch);
         await this.clearCloudEmailRequestMarker();
         clientConnection.cloudAuthHold = false;
         this.log.info(
-            'Cloud: Access Token gespeichert, E-Mail-Bestätigungscode entfernt – Neustarts ohne neuen Code (bis Bambu das Token ungültig macht).',
+            'Cloud: Access Token und MQTT-User gespeichert, E-Mail-Code entfernt – Neustarts ohne neue Mail (bis Bambu das Token ungültig macht).',
         );
     }
 
