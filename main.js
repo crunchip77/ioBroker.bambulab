@@ -67,7 +67,11 @@ class Bambulab extends utils.Adapter {
 
         // Handle MQTT messages (async: Cloud braucht vorher Login)
         this.mqttMessageHandle().catch(err => {
-            this.log.error(`MQTT setup failed: ${err.message || err}`);
+            if (err && err.code === 'verifyCodeSent') {
+                this.log.warn(err.message || err);
+            } else {
+                this.log.error(`MQTT setup failed: ${err.message || err}`);
+            }
             clientConnection.initiated = false;
             clientConnection.connectError = true;
         });

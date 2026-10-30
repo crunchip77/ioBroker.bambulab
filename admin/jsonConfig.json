@@ -57,6 +57,23 @@
             ],
             "hidden": "data.connectionMode !== 'cloud'"
         },
+        "cloudLoginMethod": {
+            "type": "select",
+            "label": "Cloud login method",
+            "newLine": true,
+            "xs": 12,
+            "sm": 12,
+            "md": 6,
+            "lg": 4,
+            "xl": 4,
+            "default": "emailCode",
+            "options": [
+                { "label": "E-mail code (Google/OAuth accounts)", "value": "emailCode" },
+                { "label": "E-mail + Bambu password", "value": "password" }
+            ],
+            "help": "Google login: use e-mail code. Set a Bambu password in the app to use password login.",
+            "hidden": "data.connectionMode !== 'cloud'"
+        },
         "cloudEmail": {
             "type": "text",
             "label": "Bambu account (email)",
@@ -68,17 +85,29 @@
             "xl": 4,
             "hidden": "data.connectionMode !== 'cloud'"
         },
-        "cloudPassword": {
-            "type": "password",
-            "label": "Bambu password",
-            "help": "Used only for login; prefer storing cloudAccessToken after first successful login",
+        "cloudVerifyCode": {
+            "type": "text",
+            "label": "Cloud E-Mail verification code",
+            "help": "6-digit code from Bambu e-mail after first adapter start (email code method). Leave empty after successful login.",
             "newLine": true,
             "xs": 12,
             "sm": 12,
             "md": 6,
             "lg": 4,
             "xl": 4,
-            "hidden": "data.connectionMode !== 'cloud'"
+            "hidden": "data.connectionMode !== 'cloud' || data.cloudLoginMethod !== 'emailCode'"
+        },
+        "cloudPassword": {
+            "type": "password",
+            "label": "Bambu password",
+            "help": "Only for password method — Bambu app password, not Google",
+            "newLine": true,
+            "xs": 12,
+            "sm": 12,
+            "md": 6,
+            "lg": 4,
+            "xl": 4,
+            "hidden": "data.connectionMode !== 'cloud' || data.cloudLoginMethod !== 'password'"
         },
         "cloudAccessToken": {
             "type": "password",
