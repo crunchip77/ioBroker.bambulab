@@ -258,6 +258,16 @@ class Bambulab extends utils.Adapter {
                         'Abgelaufenen E-Mail-Code aus der Config entfernt – bitte Instanz neu starten (neue E-Mail), einmal Code eintragen; danach speichert der Adapter das Token automatisch.',
                     );
                 }
+            } else if (e instanceof bambuCloud.BambuCloudAuthError && e.code === 'tokenInvalid') {
+                this.log.error(e.message || e);
+                try {
+                    await this.mergeCloudNativePatch({ cloudAccessToken: '', cloudVerifyCode: '' });
+                    this.log.warn(
+                        'Ungültiges Cloud-Token aus der Config entfernt – Instanz neu starten, E-Mail-Code eintragen (einmalig).',
+                    );
+                } catch (clearErr) {
+                    this.log.warn(`Cloud-Token konnte nicht automatisch gelöscht werden: ${clearErr.message}`);
+                }
             } else {
                 this.log.error(`[MQTT Message handler] ${e} | ${e.stack}`);
             }
