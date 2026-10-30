@@ -35,6 +35,8 @@ const blockedCommandsDuringPrinting = ['G0', 'G1', 'G28', 'G90', 'G91'];
 let currentPrintingState = null; // Track current printing state for safety checks
 /** Bambu-Konto-ID für Cloud-MQTT (pushall) – aus JWT nach Login */
 let cloudUserId = null;
+/** Frisch eingeloggt (E-Mail-Code) – Token erst nach MQTT-Connect in Config schreiben (sonst sofortiger Neustart) */
+let pendingCloudAccessToken = null;
 
 class Bambulab extends utils.Adapter {
     /**
@@ -68,6 +70,12 @@ class Bambulab extends utils.Adapter {
 
         // Download / Update HMS error Codes
         await this.loadHMSErrorCodeTranslations();
+
+        if ((this.config.connectionMode || 'lan') === 'cloud' && !(this.config.serial || '').trim()) {
+            this.log.error(
+                'Cloud: Seriennummer (serial) fehlt in der Instanz-Config – bitte im Admin eintragen und speichern, sonst kein MQTT und kein Token-Speichern.',
+            );
+        }
 
         // Handle MQTT messages (async: Cloud braucht vorher Login)
         this.mqttMessageHandle().catch(err => {
@@ -158,15 +166,13 @@ class Bambulab extends utils.Adapter {
             const connect = await this.resolveMqttConnect();
             const mode = this.config.connectionMode || 'lan';
 
-            // Cloud: Token + user_id merken, damit Neustarts nicht erneut den E-Mail-Code brauchen
+            // Cloud: user_id merken; Token erst NACH „Printer connected“ speichern (Native-Update = Instanz-Neustart)
             if (mode === 'cloud') {
                 if (connect.accessToken) {
-                    try {
-                        await this.saveCloudAccessToken(connect.accessToken);
-                    } catch (err) {
-                        this.log.error(
-                            `Cloud: Access Token konnte nicht in der Instanz gespeichert werden: ${err.message || err}`,
-                        );
+                    const stored = (this.config.cloudAccessToken || '').trim();
+                    const usedVerifyCode = !!(this.config.cloudVerifyCode || '').trim();
+                    if (usedVerifyCode || connect.accessToken !== stored) {
+                        pendingCloudAccessToken = connect.accessToken;
                     }
                 }
                 if (connect.cloudUserId) {
@@ -192,6 +198,18 @@ class Bambulab extends utils.Adapter {
                 clientConnection.connectError = false;
                 clientConnection.initiated = false; // Reset initiated flag on successful connection
                 clientConnection.reconnectMessageShown = false; // Reset for future disconnections
+                clientConnection.cloudAuthHold = false;
+
+                // Token persistent speichern (löst danach einen Neustart aus – MQTT war vorher schon OK)
+                if (pendingCloudAccessToken) {
+                    const tokenToSave = pendingCloudAccessToken;
+                    pendingCloudAccessToken = null;
+                    this.saveCloudAccessToken(tokenToSave).catch(err => {
+                        this.log.error(
+                            `Cloud: Access Token nach Connect nicht speicherbar: ${err.message || err} – bitte Serial prüfen und erneut mit E-Mail-Code anmelden.`,
+                        );
+                    });
+                }
 
                 this.createControlStates();
 
@@ -295,28 +313,22 @@ class Bambulab extends utils.Adapter {
             } else if (e instanceof bambuCloud.BambuCloudAuthError && e.code === 'verifyCodePending') {
                 this.log.warn(e.message || e);
                 clientConnection.cloudAuthHold = true;
+            } else if (e instanceof bambuCloud.BambuCloudAuthError && e.code === 'codeIncorrect') {
+                this.log.error(e.message || e);
+                clientConnection.cloudAuthHold = true;
             } else if (e instanceof bambuCloud.BambuCloudAuthError && e.code === 'codeExpired') {
                 this.log.error(`${e.message}`);
-                if ((this.config.cloudVerifyCode || '').trim()) {
-                    await this.clearCloudVerifyCode();
-                    await this.clearCloudEmailRequestMarker();
-                    clientConnection.cloudAuthHold = true;
-                    this.log.warn(
-                        'Abgelaufenen E-Mail-Code entfernt – bambulab.0 einmal neu starten (dann kommt eine neue Mail). Code eintragen, speichern, erneut starten.',
-                    );
-                }
+                clientConnection.cloudAuthHold = true;
+                this.log.warn(
+                    'E-Mail-Code in der Admin-Config leeren, speichern, Instanz neu starten (eine neue Mail), neuen Code eintragen.',
+                );
             } else if (e instanceof bambuCloud.BambuCloudAuthError && e.code === 'tokenInvalid') {
                 this.log.error(e.message || e);
-                try {
-                    await this.mergeCloudNativePatch({ cloudAccessToken: '', cloudVerifyCode: '' });
-                    await this.clearCloudEmailRequestMarker();
-                    clientConnection.cloudAuthHold = true;
-                    this.log.warn(
-                        'Ungültiges Cloud-Token entfernt – bambulab.0 einmal neu starten für E-Mail-Code, dann Code eintragen und speichern.',
-                    );
-                } catch (clearErr) {
-                    this.log.warn(`Cloud-Token konnte nicht automatisch gelöscht werden: ${clearErr.message}`);
-                }
+                this.config.cloudAccessToken = '';
+                clientConnection.cloudAuthHold = true;
+                this.log.warn(
+                    'Im Admin „Cloud access token“ leeren und speichern (kein Auto-Neustart). Dann Instanz starten – eine E-Mail mit Code.',
+                );
             } else {
                 this.log.error(`[MQTT Message handler] ${e} | ${e.stack}`);
             }
