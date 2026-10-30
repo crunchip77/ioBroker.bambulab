@@ -6,18 +6,16 @@
 - **Prod-ioBroker:** MCP `iobroker-prod` (10.1.1.10)
 - **Test-ioBroker:** MCP `iobroker-1` (10.1.1.111, Docker `a466d9d06dba`)
 
-## Auf Test-Container deployen
+## Auf Test-Container deployen (Unraid Docker)
 
-Im Container (SSH/Shell), nachdem der Ordner dort liegt oder per `git pull`:
+Vom **GitHub-Fork** installieren (wie AutoDoc), **im ioBroker-Container**:
 
 ```bash
-cd /pfad/zu/ioBroker.bambulab
-npm install
-iobroker url .
+iobroker url https://github.com/crunchip77/ioBroker.bambulab/tarball/feature/cloud-mqtt
 iobroker restart bambulab.0
 ```
 
-Oder: Ordner nach `/opt/iobroker/node_modules/iobroker.bambulab` kopieren und Instanz neu starten.
+Nach Code-Änderungen: erneut `iobroker url …` mit demselben Branch, dann restart.
 
 ## Adapter testen
 
