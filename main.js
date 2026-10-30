@@ -234,7 +234,11 @@ class Bambulab extends utils.Adapter {
                 timeouts[this.config.serial] = this.setTimeout(() => {
                     // Create a new MQTT connection instead of reconnecting the ended client
                     this.mqttMessageHandle().catch(err => {
-                        this.log.error(`MQTT reconnect failed: ${err.message || err}`);
+                        if (err instanceof bambuCloud.BambuCloudAuthError && err.code === 'verifyCodeSent') {
+                            this.log.warn(err.message || err);
+                        } else {
+                            this.log.error(`MQTT reconnect failed: ${err.message || err}`);
+                        }
                         clientConnection.initiated = false;
                     });
                 }, 30000);
@@ -243,7 +247,10 @@ class Bambulab extends utils.Adapter {
                 clientConnection.initiated = false;
             });
         } catch (e) {
-            if (e instanceof bambuCloud.BambuCloudAuthError && e.code === 'codeExpired') {
+            if (e instanceof bambuCloud.BambuCloudAuthError && e.code === 'verifyCodeSent') {
+                // Kein Fehler: Bambu hat Code per Mail geschickt, Nutzer muss ihn eintragen
+                this.log.warn(e.message || e);
+            } else if (e instanceof bambuCloud.BambuCloudAuthError && e.code === 'codeExpired') {
                 this.log.error(`${e.message}`);
                 if ((this.config.cloudVerifyCode || '').trim()) {
                     await this.clearCloudVerifyCode();
