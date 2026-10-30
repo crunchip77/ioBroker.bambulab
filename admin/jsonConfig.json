@@ -27,10 +27,7 @@
             "md": 6,
             "lg": 4,
             "xl": 4,
-            "visible": {
-                "dependsOn": "connectionMode",
-                "value": "lan"
-            }
+            "hidden": "data.connectionMode !== 'lan'"
         },
         "Password": {
             "type": "password",
@@ -42,10 +39,7 @@
             "md": 6,
             "lg": 4,
             "xl": 4,
-            "visible": {
-                "dependsOn": "connectionMode",
-                "value": "lan"
-            }
+            "hidden": "data.connectionMode !== 'lan'"
         },
         "cloudRegion": {
             "type": "select",
@@ -61,10 +55,7 @@
                 { "label": "Global (EU/US)", "value": "global" },
                 { "label": "China", "value": "china" }
             ],
-            "visible": {
-                "dependsOn": "connectionMode",
-                "value": "cloud"
-            }
+            "hidden": "data.connectionMode !== 'cloud'"
         },
         "cloudEmail": {
             "type": "text",
@@ -75,10 +66,7 @@
             "md": 6,
             "lg": 4,
             "xl": 4,
-            "visible": {
-                "dependsOn": "connectionMode",
-                "value": "cloud"
-            }
+            "hidden": "data.connectionMode !== 'cloud'"
         },
         "cloudPassword": {
             "type": "password",
@@ -90,10 +78,7 @@
             "md": 6,
             "lg": 4,
             "xl": 4,
-            "visible": {
-                "dependsOn": "connectionMode",
-                "value": "cloud"
-            }
+            "hidden": "data.connectionMode !== 'cloud'"
         },
         "cloudAccessToken": {
             "type": "password",
@@ -105,10 +90,7 @@
             "md": 6,
             "lg": 4,
             "xl": 4,
-            "visible": {
-                "dependsOn": "connectionMode",
-                "value": "cloud"
-            }
+            "hidden": "data.connectionMode !== 'cloud'"
         },
         "serial": {
             "type": "text",
