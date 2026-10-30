@@ -31,6 +31,8 @@ let language = 'en'; // System language to handle error code translations, defau
 // Array of G-code commands that should be blocked during printing for safety
 const blockedCommandsDuringPrinting = ['G0', 'G1', 'G28', 'G90', 'G91'];
 let currentPrintingState = null; // Track current printing state for safety checks
+/** Bambu-Konto-ID für Cloud-MQTT (pushall) – aus JWT nach Login */
+let cloudUserId = null;
 
 class Bambulab extends utils.Adapter {
     /**
@@ -121,6 +123,18 @@ class Bambulab extends utils.Adapter {
 
             const connect = await this.resolveMqttConnect();
             const mode = this.config.connectionMode || 'lan';
+
+            // Cloud: Token + user_id merken, damit Neustarts nicht erneut den E-Mail-Code brauchen
+            if (mode === 'cloud') {
+                if (connect.accessToken) {
+                    await this.saveCloudAccessToken(connect.accessToken);
+                }
+                if (connect.cloudUserId) {
+                    cloudUserId = connect.cloudUserId;
+                    this.log.debug(`Cloud user_id für pushall: ${cloudUserId}`);
+                }
+            }
+
             this.log.info(
                 `MQTT ${mode === 'cloud' ? 'Cloud' : 'LAN'} → ${connect.url.replace(/\/\/.*@/, '//')}`,
             );
@@ -223,8 +237,52 @@ class Bambulab extends utils.Adapter {
                 clientConnection.initiated = false;
             });
         } catch (e) {
-            this.log.error(`[MQTT Message handler] ${e} | ${e.stack}`);
+            if (e instanceof bambuCloud.BambuCloudAuthError && e.code === 'codeExpired') {
+                this.log.error(`${e.message}`);
+                if ((this.config.cloudVerifyCode || '').trim()) {
+                    await this.clearCloudVerifyCode();
+                    this.log.warn(
+                        'Abgelaufenen E-Mail-Code aus der Config entfernt – bitte Instanz neu starten (neue E-Mail), einmal Code eintragen; danach speichert der Adapter das Token automatisch.',
+                    );
+                }
+            } else {
+                this.log.error(`[MQTT Message handler] ${e} | ${e.stack}`);
+            }
+            clientConnection.initiated = false;
         }
+    }
+
+    /**
+     * Nach erfolgreichem Cloud-Login: JWT als cloudAccessToken speichern, Einmal-Code löschen.
+     * Warum? Der E-Mail-Code ist kurz gültig – ohne Token schlägt jeder Neustart fehl.
+     */
+    async saveCloudAccessToken(accessToken) {
+        const token = (accessToken || '').trim();
+        if (!token) {
+            return;
+        }
+        const hadToken = (this.config.cloudAccessToken || '').trim() === token;
+        const hadVerify = !(this.config.cloudVerifyCode || '').trim();
+        if (hadToken && hadVerify) {
+            return;
+        }
+        const native = { ...this.config, cloudAccessToken: token, cloudVerifyCode: '' };
+        await this.updateInstanceNativeAsync(native);
+        this.config.cloudAccessToken = token;
+        this.config.cloudVerifyCode = '';
+        this.log.info(
+            'Cloud: Access Token gespeichert, E-Mail-Bestätigungscode entfernt – Neustarts ohne neuen Code (bis Bambu das Token ungültig macht).',
+        );
+    }
+
+    /** Abgelaufenen oder falschen Einmal-Code aus der Instanz-Config entfernen */
+    async clearCloudVerifyCode() {
+        if (!(this.config.cloudVerifyCode || '').trim()) {
+            return;
+        }
+        const native = { ...this.config, cloudVerifyCode: '' };
+        await this.updateInstanceNativeAsync(native);
+        this.config.cloudVerifyCode = '';
     }
 
     /**
@@ -503,13 +561,16 @@ class Bambulab extends utils.Adapter {
     }
 
     requestData() {
+        // Cloud: echte Bambu-user_id; LAN: Platzhalter reicht oft, Cloud eher nicht
+        const user_id = cloudUserId || '1234567890';
+
         // Prepare MQTT message
         const msg = {
             pushing: {
                 sequence_id: '1',
                 command: 'pushall',
             },
-            user_id: '1234567890',
+            user_id,
         };
 
         // Try to request data
@@ -521,8 +582,9 @@ class Bambulab extends utils.Adapter {
             timeouts['dataPolling'] = null;
         }
         timeouts['dataPolling'] = this.setTimeout(() => {
-            // Request data for P1p printer series
-            if (this.config.printerModel === 'P1-Series') {
+            // P1/H2D: Drucker pusht nicht ständig – Status per Intervall anfordern
+            const pollModels = ['P1-Series', 'H2D-Series'];
+            if (pollModels.includes(this.config.printerModel)) {
                 this.requestData();
             }
         }, this.config.requestInterval * 1000);
