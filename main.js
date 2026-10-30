@@ -6,6 +6,9 @@
 
 // The adapter-core module gives you access to the core ioBroker functions
 // you need to create an adapter
+const fs = require('fs').promises;
+const path = require('path');
+
 const utils = require('@iobroker/adapter-core');
 
 const mqtt = require('mqtt'); // MQTT request library
@@ -79,6 +82,9 @@ class Bambulab extends utils.Adapter {
                 'Cloud: Seriennummer (serial) fehlt in der Instanz-Config – bitte im Admin eintragen und speichern, sonst kein MQTT und kein Token-Speichern.',
             );
         }
+
+        // Cloud-JWT aus Datei (Native-Verschlüsselung kann das MQTT-Passwort nach Neustart ungültig machen)
+        await this.loadCloudCredentialsFromFile();
 
         // Handle MQTT messages (async: Cloud braucht vorher Login)
         this.mqttMessageHandle().catch(err => {
@@ -339,6 +345,7 @@ class Bambulab extends utils.Adapter {
             } else if (e instanceof bambuCloud.BambuCloudAuthError && e.code === 'tokenInvalid') {
                 this.log.error(e.message || e);
                 this.config.cloudAccessToken = '';
+                await this.clearCloudCredentialsFile();
                 clientConnection.cloudAuthHold = true;
                 this.log.warn(
                     'Im Admin „Cloud access token“ leeren und speichern (kein Auto-Neustart). Dann Instanz starten – eine E-Mail mit Code.',
@@ -369,9 +376,66 @@ class Bambulab extends utils.Adapter {
         Object.assign(this.config, patch);
     }
 
+    /** Pfad zur lokalen Cloud-JWT-Datei (nicht über encryptedNative – sonst „Not authorized“ nach Neustart). */
+    cloudCredentialsFilePath() {
+        return path.join(this.adapterDir, 'cloud-credentials.json');
+    }
+
     /**
-     * Nach erfolgreichem Cloud-MQTT: Token + MQTT-User speichern, Einmal-Code löschen.
-     * MQTT-User mit speichern, damit nach Instanz-Neustart keine Preference-API nötig ist (die oft 401 liefert).
+     * JWT + MQTT-User aus Datei laden (hat Vorrang vor Native cloudAccessToken).
+     */
+    async loadCloudCredentialsFromFile() {
+        if ((this.config.connectionMode || 'lan') !== 'cloud') {
+            return;
+        }
+        try {
+            const raw = await fs.readFile(this.cloudCredentialsFilePath(), 'utf8');
+            const cred = JSON.parse(raw);
+            const token = (cred.accessToken || '').trim();
+            if (!token) {
+                return;
+            }
+            this.config.cloudAccessToken = token;
+            if (cred.cloudMqttUsername) {
+                this.config.cloudMqttUsername = String(cred.cloudMqttUsername).trim();
+            }
+            if (cred.cloudUserId != null && String(cred.cloudUserId).trim() !== '') {
+                this.config.cloudUserId = String(cred.cloudUserId).trim();
+            }
+            this.log.debug(`Cloud: Zugangsdaten aus lokaler Datei (Token-Länge ${token.length}).`);
+        } catch (err) {
+            if (err && err.code !== 'ENOENT') {
+                this.log.warn(`Cloud: Lokale Zugangsdaten nicht lesbar: ${err.message || err}`);
+            }
+        }
+    }
+
+    async writeCloudCredentialsFile({ accessToken, cloudMqttUsername, cloudUserId }) {
+        const payload = {
+            accessToken: (accessToken || '').trim(),
+            cloudMqttUsername: (cloudMqttUsername || '').trim(),
+            cloudUserId: cloudUserId != null ? String(cloudUserId).trim() : '',
+            savedAt: Date.now(),
+        };
+        await fs.writeFile(this.cloudCredentialsFilePath(), JSON.stringify(payload), {
+            encoding: 'utf8',
+            mode: 0o600,
+        });
+    }
+
+    async clearCloudCredentialsFile() {
+        try {
+            await fs.unlink(this.cloudCredentialsFilePath());
+        } catch (err) {
+            if (err && err.code !== 'ENOENT') {
+                this.log.warn(`Cloud: Lokale Zugangsdaten nicht löschbar: ${err.message || err}`);
+            }
+        }
+    }
+
+    /**
+     * Nach erfolgreichem Cloud-MQTT: Token in Datei, MQTT-User in Native, E-Mail-Code löschen.
+     * JWT nicht in encryptedNative speichern – ioBroker kann es verfälschen → MQTT „Not authorized“.
      */
     async saveCloudCredentials({ accessToken, cloudMqttUsername, cloudUserId }) {
         const token = (accessToken || '').trim();
@@ -380,26 +444,30 @@ class Bambulab extends utils.Adapter {
         }
         const mqttUser = (cloudMqttUsername || '').trim();
         const uid = cloudUserId != null ? String(cloudUserId).trim() : '';
-        const patch = { cloudAccessToken: token, cloudVerifyCode: '' };
+
+        await this.writeCloudCredentialsFile({
+            accessToken: token,
+            cloudMqttUsername: mqttUser,
+            cloudUserId: uid,
+        });
+
+        const patch = {
+            cloudVerifyCode: '',
+            cloudAccessToken: '',
+        };
         if (mqttUser && /^u_\d+$/.test(mqttUser)) {
             patch.cloudMqttUsername = mqttUser;
         }
         if (uid && /^\d+$/.test(uid)) {
             patch.cloudUserId = uid;
         }
-        const unchanged =
-            (this.config.cloudAccessToken || '').trim() === token &&
-            !(this.config.cloudVerifyCode || '').trim() &&
-            (this.config.cloudMqttUsername || '').trim() === (patch.cloudMqttUsername || '') &&
-            String(this.config.cloudUserId || '').trim() === (patch.cloudUserId || '');
-        if (unchanged) {
-            return;
-        }
+
         await this.mergeCloudNativePatch(patch);
+        this.config.cloudAccessToken = token;
         await this.clearCloudEmailRequestMarker();
         clientConnection.cloudAuthHold = false;
         this.log.info(
-            'Cloud: Access Token und MQTT-User gespeichert, E-Mail-Code entfernt – Neustarts ohne neue Mail (bis Bambu das Token ungültig macht).',
+            'Cloud: Token in lokaler Datei gespeichert, MQTT-User in Config – Neustarts ohne neue Mail (bis Bambu das Token ungültig macht).',
         );
     }
 
