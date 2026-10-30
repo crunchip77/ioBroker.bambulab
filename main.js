@@ -23,6 +23,8 @@ const clientConnection = {
     initiated: false,
     reconnectMessageShown: false, // Track if we've shown the reconnection message
     messageBuffer: false, // Track if message buffer is active
+    /** Cloud: kein erneuter Login/Mail bis Nutzer Code oder Token in der Config hat */
+    cloudAuthHold: false,
 };
 const timeouts = {}; // Object array containing all running timers
 const errorCodesHMS = {}; // Object array of translated error codes
@@ -69,7 +71,7 @@ class Bambulab extends utils.Adapter {
 
         // Handle MQTT messages (async: Cloud braucht vorher Login)
         this.mqttMessageHandle().catch(err => {
-            if (err && err.code === 'verifyCodeSent') {
+            if (err && (err.code === 'verifyCodeSent' || err.code === 'verifyCodePending')) {
                 this.log.warn(err.message || err);
             } else {
                 this.log.error(`MQTT setup failed: ${err.message || err}`);
@@ -84,7 +86,25 @@ class Bambulab extends utils.Adapter {
      */
     async resolveMqttConnect() {
         const logFn = (level, msg) => this.log[level](msg);
-        return bambuCloud.buildMqttConnect(this.config, logFn);
+        let cloudEmailCodeRequestedAt = 0;
+        try {
+            const st = await this.getStateAsync('info.cloudEmailCodeRequestedAt');
+            if (st && st.val != null && st.val !== '') {
+                cloudEmailCodeRequestedAt = Number(st.val);
+            }
+        } catch {
+            // State evtl. noch nicht angelegt
+        }
+        return bambuCloud.buildMqttConnect({ ...this.config, cloudEmailCodeRequestedAt }, logFn);
+    }
+
+    /** Merkt Zeitpunkt der letzten Code-Mail (State, kein Native-Update → kein Instanz-Neustart). */
+    async markCloudEmailRequested() {
+        await this.setState('info.cloudEmailCodeRequestedAt', Date.now(), true);
+    }
+
+    async clearCloudEmailRequestMarker() {
+        await this.setState('info.cloudEmailCodeRequestedAt', 0, true);
     }
 
     /**
@@ -92,6 +112,20 @@ class Bambulab extends utils.Adapter {
      */
     async mqttMessageHandle() {
         try {
+            const modeEarly = this.config.connectionMode || 'lan';
+            const hasCloudToken = !!(this.config.cloudAccessToken || '').trim();
+            const hasCloudCode = !!(this.config.cloudVerifyCode || '').trim();
+            if (modeEarly === 'cloud') {
+                if (hasCloudToken || hasCloudCode) {
+                    clientConnection.cloudAuthHold = false;
+                } else if (clientConnection.cloudAuthHold) {
+                    this.log.debug(
+                        'Cloud: Warte auf E-Mail-Code oder Access Token in der Config – keine neue Mail, kein Retry.',
+                    );
+                    return;
+                }
+            }
+
             // Prevent multiple concurrent connection attempts
             if (clientConnection.initiated) {
                 this.log.debug(`MQTT connection already in progress, skipping`);
@@ -232,9 +266,15 @@ class Bambulab extends utils.Adapter {
                     timeouts[this.config.serial] = null;
                 }
                 timeouts[this.config.serial] = this.setTimeout(() => {
+                    if (clientConnection.cloudAuthHold) {
+                        return;
+                    }
                     // Create a new MQTT connection instead of reconnecting the ended client
                     this.mqttMessageHandle().catch(err => {
-                        if (err instanceof bambuCloud.BambuCloudAuthError && err.code === 'verifyCodeSent') {
+                        if (
+                            err instanceof bambuCloud.BambuCloudAuthError &&
+                            (err.code === 'verifyCodeSent' || err.code === 'verifyCodePending')
+                        ) {
                             this.log.warn(err.message || err);
                         } else {
                             this.log.error(`MQTT reconnect failed: ${err.message || err}`);
@@ -250,20 +290,29 @@ class Bambulab extends utils.Adapter {
             if (e instanceof bambuCloud.BambuCloudAuthError && e.code === 'verifyCodeSent') {
                 // Kein Fehler: Bambu hat Code per Mail geschickt, Nutzer muss ihn eintragen
                 this.log.warn(e.message || e);
+                await this.markCloudEmailRequested();
+                clientConnection.cloudAuthHold = true;
+            } else if (e instanceof bambuCloud.BambuCloudAuthError && e.code === 'verifyCodePending') {
+                this.log.warn(e.message || e);
+                clientConnection.cloudAuthHold = true;
             } else if (e instanceof bambuCloud.BambuCloudAuthError && e.code === 'codeExpired') {
                 this.log.error(`${e.message}`);
                 if ((this.config.cloudVerifyCode || '').trim()) {
                     await this.clearCloudVerifyCode();
+                    await this.clearCloudEmailRequestMarker();
+                    clientConnection.cloudAuthHold = true;
                     this.log.warn(
-                        'Abgelaufenen E-Mail-Code aus der Config entfernt – bitte Instanz neu starten (neue E-Mail), einmal Code eintragen; danach speichert der Adapter das Token automatisch.',
+                        'Abgelaufenen E-Mail-Code entfernt – bambulab.0 einmal neu starten (dann kommt eine neue Mail). Code eintragen, speichern, erneut starten.',
                     );
                 }
             } else if (e instanceof bambuCloud.BambuCloudAuthError && e.code === 'tokenInvalid') {
                 this.log.error(e.message || e);
                 try {
                     await this.mergeCloudNativePatch({ cloudAccessToken: '', cloudVerifyCode: '' });
+                    await this.clearCloudEmailRequestMarker();
+                    clientConnection.cloudAuthHold = true;
                     this.log.warn(
-                        'Ungültiges Cloud-Token aus der Config entfernt – Instanz neu starten, E-Mail-Code eintragen (einmalig).',
+                        'Ungültiges Cloud-Token entfernt – bambulab.0 einmal neu starten für E-Mail-Code, dann Code eintragen und speichern.',
                     );
                 } catch (clearErr) {
                     this.log.warn(`Cloud-Token konnte nicht automatisch gelöscht werden: ${clearErr.message}`);
@@ -306,6 +355,8 @@ class Bambulab extends utils.Adapter {
             return;
         }
         await this.mergeCloudNativePatch({ cloudAccessToken: token, cloudVerifyCode: '' });
+        await this.clearCloudEmailRequestMarker();
+        clientConnection.cloudAuthHold = false;
         this.log.info(
             'Cloud: Access Token gespeichert, E-Mail-Bestätigungscode entfernt – Neustarts ohne neuen Code (bis Bambu das Token ungültig macht).',
         );
