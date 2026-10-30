@@ -686,6 +686,24 @@ class Bambulab extends utils.Adapter {
                 message.print.doorOpen = false;
             }
 
+            // Typ-Korrektur vor jsonExplorer (sonst ioBroker info: „has to be type …“)
+            if (message.print.err2 && message.print.err2.err_code != null) {
+                const c = message.print.err2.err_code;
+                if (typeof c === 'string' && c !== '' && !Number.isNaN(Number(c))) {
+                    message.print.err2.err_code = Number(c);
+                }
+            }
+            const nozzle = message.print.device && message.print.device.nozzle;
+            if (nozzle && nozzle.tar_id != null && typeof nozzle.tar_id !== 'number') {
+                const n = Number(nozzle.tar_id);
+                if (!Number.isNaN(n)) {
+                    nozzle.tar_id = n;
+                }
+            }
+
+            // H2D sendet viele Felder, die in state_attr.js (noch) fehlen – ohne validateAttribute kein Sentry-/Warn-Spam
+            const strictStateAttr = !/^H2D/i.test(this.config.printerModel || '');
+
             // Explore JSON & create states
             const returnJONexplorer = await jsonExplorer.traverseJson(
                 message.print,
@@ -693,6 +711,7 @@ class Bambulab extends utils.Adapter {
                 false,
                 false,
                 0,
+                strictStateAttr,
             );
             this.log.debug(`Response of JSONexploer: ${JSON.stringify(returnJONexplorer)}`);
         } catch (e) {
