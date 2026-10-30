@@ -326,17 +326,20 @@ class Bambulab extends utils.Adapter {
 
     /**
      * Native-Felder der eigenen Instanz patchen (system.adapter.bambulab.0).
-     * ioBroker adapter-core hat kein updateInstanceNativeAsync – extendForeignObjectAsync nutzen.
+     *
+     * WICHTIG: getForeignObjectAsync().native enthält oft KEINE protected/encrypted Felder
+     * (serial, cloudAccessToken, …). Nur this.config als Basis nutzen – sonst gehen sie verloren
+     * → NO_ADAPTER_CONFIG_FOUND.
      */
     async mergeCloudNativePatch(patch) {
         const id = `system.adapter.${this.namespace}`;
-        const inst = await this.getForeignObjectAsync(id);
-        if (!inst || typeof inst.native !== 'object') {
-            throw new Error(`${id} nicht lesbar`);
+        if (!(this.config.serial || '').trim()) {
+            throw new Error(
+                'Seriennummer fehlt in der laufenden Config – Native wird nicht überschrieben. Bitte im Admin unter „Serial“ eintragen.',
+            );
         }
-        await this.extendForeignObjectAsync(id, {
-            native: { ...inst.native, ...patch },
-        });
+        const native = { ...this.config, ...patch };
+        await this.extendForeignObjectAsync(id, { native });
         Object.assign(this.config, patch);
     }
 
