@@ -127,7 +127,13 @@ class Bambulab extends utils.Adapter {
             // Cloud: Token + user_id merken, damit Neustarts nicht erneut den E-Mail-Code brauchen
             if (mode === 'cloud') {
                 if (connect.accessToken) {
-                    await this.saveCloudAccessToken(connect.accessToken);
+                    try {
+                        await this.saveCloudAccessToken(connect.accessToken);
+                    } catch (err) {
+                        this.log.error(
+                            `Cloud: Access Token konnte nicht in der Instanz gespeichert werden: ${err.message || err}`,
+                        );
+                    }
                 }
                 if (connect.cloudUserId) {
                     cloudUserId = connect.cloudUserId;
@@ -253,6 +259,22 @@ class Bambulab extends utils.Adapter {
     }
 
     /**
+     * Native-Felder der eigenen Instanz patchen (system.adapter.bambulab.0).
+     * ioBroker adapter-core hat kein updateInstanceNativeAsync – extendForeignObjectAsync nutzen.
+     */
+    async mergeCloudNativePatch(patch) {
+        const id = `system.adapter.${this.namespace}`;
+        const inst = await this.getForeignObjectAsync(id);
+        if (!inst || typeof inst.native !== 'object') {
+            throw new Error(`${id} nicht lesbar`);
+        }
+        await this.extendForeignObjectAsync(id, {
+            native: { ...inst.native, ...patch },
+        });
+        Object.assign(this.config, patch);
+    }
+
+    /**
      * Nach erfolgreichem Cloud-Login: JWT als cloudAccessToken speichern, Einmal-Code löschen.
      * Warum? Der E-Mail-Code ist kurz gültig – ohne Token schlägt jeder Neustart fehl.
      */
@@ -266,10 +288,7 @@ class Bambulab extends utils.Adapter {
         if (hadToken && hadVerify) {
             return;
         }
-        const native = { ...this.config, cloudAccessToken: token, cloudVerifyCode: '' };
-        await this.updateInstanceNativeAsync(native);
-        this.config.cloudAccessToken = token;
-        this.config.cloudVerifyCode = '';
+        await this.mergeCloudNativePatch({ cloudAccessToken: token, cloudVerifyCode: '' });
         this.log.info(
             'Cloud: Access Token gespeichert, E-Mail-Bestätigungscode entfernt – Neustarts ohne neuen Code (bis Bambu das Token ungültig macht).',
         );
@@ -280,9 +299,7 @@ class Bambulab extends utils.Adapter {
         if (!(this.config.cloudVerifyCode || '').trim()) {
             return;
         }
-        const native = { ...this.config, cloudVerifyCode: '' };
-        await this.updateInstanceNativeAsync(native);
-        this.config.cloudVerifyCode = '';
+        await this.mergeCloudNativePatch({ cloudVerifyCode: '' });
     }
 
     /**
