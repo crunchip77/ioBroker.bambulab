@@ -16,7 +16,7 @@
                 { "label": "LAN (local MQTT at printer IP)", "value": "lan" },
                 { "label": "Cloud (Bambu account MQTT)", "value": "cloud" }
             ],
-            "help": "LAN needs printer IP and LAN access token. Cloud uses your Bambu account (experimental in this fork)."
+            "help": "LAN: full control (fans, temps, G-code) via local MQTT + access code. Cloud: monitoring + limited control (e.g. chamber LED); H2D often blocks print.* commands over cloud — see info.cloudPrintControlBlocked."
         },
         "host": {
             "type": "text",

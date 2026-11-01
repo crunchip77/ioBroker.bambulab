@@ -982,7 +982,7 @@ class Bambulab extends utils.Adapter {
         this.cloudPrintControlBlocked = true;
         this.setState('info.cloudPrintControlBlocked', true, true).catch(() => {});
         this.log.warn(
-            'Cloud: Drucker lehnt print-Befehle ab (Lüfter/G-Code). H2D: in Bambu-App Entwicklermodus/LAN-Steuerung aktivieren oder Adapter auf LAN-Modus mit Access-Code umstellen.',
+            'Cloud: Drucker lehnt print-Befehle ab (Lüfter, G-Code, oft Soll-Temperatur). Das ist Firmware-Policy (vgl. ha-bambulab #1330), kein Adapter-Fehler. Volle Steuerung: connectionMode=lan, Drucker-IP + LAN Access Code (Drucker im LAN-Modus). State: info.cloudPrintControlBlocked.',
         );
     }
 

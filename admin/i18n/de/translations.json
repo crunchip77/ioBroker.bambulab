@@ -3,6 +3,7 @@
     "LAN (local MQTT at printer IP)": "LAN (MQTT direkt am Drucker)",
     "Cloud (Bambu account MQTT)": "Cloud (MQTT über Bambu-Konto)",
     "LAN needs printer IP and LAN access token. Cloud uses your Bambu account (experimental in this fork).": "LAN: Drucker-IP und LAN-Token. Cloud: Bambu-Konto (experimentell in diesem Fork).",
+    "LAN: full control (fans, temps, G-code) via local MQTT + access code. Cloud: monitoring + limited control (e.g. chamber LED); H2D often blocks print.* commands over cloud — see info.cloudPrintControlBlocked.": "LAN: volle Steuerung (Lüfter, Soll-Temp., G-Code) per lokalem MQTT + Access Code. Cloud: vor allem Monitoring + begrenzte Steuerung (z. B. Kammer-LED); am H2D blockiert die Firmware oft print-Befehle — State info.cloudPrintControlBlocked.",
     "Cloud region": "Cloud-Region",
     "Global (EU/US)": "Global (EU/US)",
     "China": "China",
