@@ -871,6 +871,12 @@ class Bambulab extends utils.Adapter {
         if (msg.print && msg.print.user_id == null) {
             msg.print.user_id = uid;
         }
+        if (msg.pushing && msg.pushing.user_id == null) {
+            msg.pushing.user_id = uid;
+        }
+        if (msg.system && msg.system.user_id == null) {
+            msg.system.user_id = uid;
+        }
         return msg;
     }
 
@@ -933,26 +939,29 @@ class Bambulab extends utils.Adapter {
         return /^H2D/i.test(this.config.printerModel || '');
     }
 
-    /** Lüfter-Sollwert ioBroker (0–100 %) → G-code S0–255 */
-    fanSpeedPercentToS(percent) {
-        const p = Number(percent);
-        if (Number.isNaN(p)) {
-            return 0;
-        }
-        return Math.round(Math.max(0, Math.min(100, p)) * 2.55);
-    }
-
     /**
-     * M106-Lüftersteuerung; H2D: Hilfs-/Kammer-Lüfter (P2/P3) brauchen oft M145 P0 (Kühl-Luftkanal).
+     * Lüfter-Sollwert (0–100 %) → G-code S0–255 (wie ha-bambulab: 10 %-Schritte, ceil).
+     * Format: "M106 P1 S127\n" – eine Zeile, kein M145 (Mehrzeiler löst am H2D oft „MQTT fehlgeschlagen“ aus).
      */
     buildFanSpeedGcode(fanP, percent) {
-        const s = this.fanSpeedPercentToS(percent);
-        let param = '';
-        if (this.isH2dPrinter() && (fanP === 2 || fanP === 3)) {
-            param += 'M145 P0 \n';
+        let p = Number(percent);
+        if (Number.isNaN(p)) {
+            p = 0;
         }
-        param += `M106 P${fanP} S${s} \n`;
-        return param;
+        p = Math.round(p / 10) * 10;
+        p = Math.max(0, Math.min(100, p));
+        const s = Math.ceil((255 * p) / 100);
+        return `M106 P${fanP} S${s}\n`;
+    }
+
+    buildPrintGcodeLineMessage(gcodeParam) {
+        return {
+            print: {
+                sequence_id: '0',
+                command: 'gcode_line',
+                param: gcodeParam,
+            },
+        };
     }
 
     /** State-Name aus …control.<name> (Serial-Ordner oder Instanz-control). */
@@ -1455,23 +1464,10 @@ class Bambulab extends utils.Adapter {
                         };
                         break;
                     case 'fanSpeedChamber':
-                        // Legacy-State-Name (P1/X1); aktuelle States heißen big_fan2_speed
-                        msg = {
-                            print: {
-                                command: 'gcode_line',
-                                param: this.buildFanSpeedGcode(3, state.val),
-                                sequence_id: '0',
-                            },
-                        };
+                        msg = this.buildPrintGcodeLineMessage(this.buildFanSpeedGcode(3, state.val));
                         break;
                     case 'heatbreak_fan_speed':
-                        msg = {
-                            print: {
-                                command: 'gcode_line',
-                                param: this.buildFanSpeedGcode(4, state.val),
-                                sequence_id: '0',
-                            },
-                        };
+                        msg = this.buildPrintGcodeLineMessage(this.buildFanSpeedGcode(4, state.val));
                         this.log.info(`Lüfter Heatbreak → ${state.val}% (M106 P4)`);
                         break;
                     case 'spd_lvl':
@@ -1503,33 +1499,15 @@ class Bambulab extends utils.Adapter {
                         };
                         break;
                     case 'big_fan1_speed':
-                        msg = {
-                            print: {
-                                command: 'gcode_line',
-                                param: this.buildFanSpeedGcode(2, state.val),
-                                sequence_id: '0',
-                            },
-                        };
+                        msg = this.buildPrintGcodeLineMessage(this.buildFanSpeedGcode(2, state.val));
                         this.log.info(`Lüfter AUX (big_fan1) → ${state.val}% (M106 P2)`);
                         break;
                     case 'big_fan2_speed':
-                        msg = {
-                            print: {
-                                command: 'gcode_line',
-                                param: this.buildFanSpeedGcode(3, state.val),
-                                sequence_id: '0',
-                            },
-                        };
+                        msg = this.buildPrintGcodeLineMessage(this.buildFanSpeedGcode(3, state.val));
                         this.log.info(`Lüfter Kammer (big_fan2) → ${state.val}% (M106 P3)`);
                         break;
                     case 'cooling_fan_speed':
-                        msg = {
-                            print: {
-                                command: 'gcode_line',
-                                param: this.buildFanSpeedGcode(1, state.val),
-                                sequence_id: '0',
-                            },
-                        };
+                        msg = this.buildPrintGcodeLineMessage(this.buildFanSpeedGcode(1, state.val));
                         this.log.info(`Part-Cooling-Lüfter → ${state.val}% (M106 P1)`);
                         break;
                     case 'homing':
@@ -1554,6 +1532,9 @@ class Bambulab extends utils.Adapter {
                 }
 
                 if (msg) {
+                    if (msg.print && msg.print.command === 'gcode_line') {
+                        this.log.debug(`MQTT gcode_line: ${JSON.stringify(msg.print.param).substring(0, 120)}`);
+                    }
                     this.publishMQTTmessages(msg);
                 }
             }
