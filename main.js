@@ -617,22 +617,8 @@ class Bambulab extends utils.Adapter {
                 if (message.print.vt_tray != null && message.print.vt_tray.bed_temp != null) {
                     message.print.vt_tray.bed_temp = +message.print.vt_tray.bed_temp;
                 }
-                // Update light control datapoint
-                if (
-                    message.print.lights_report &&
-                    message.print.lights_report[0] &&
-                    message.print.lights_report[0].mode === 'on'
-                ) {
-                    message.print.control.lightChamber = true;
-                    message.print.lights_report[0].mode = true;
-                } else if (
-                    message.print.lights_report &&
-                    message.print.lights_report[0] &&
-                    message.print.lights_report[0].mode === 'off'
-                ) {
-                    message.print.control.lightChamber = false;
-                    message.print.lights_report[0].mode = false;
-                }
+                // Kammerlicht-Status für control.lightChamber (H2D: links + rechts)
+                this.syncChamberLightControlState(message.print);
 
                 // Translate HMS Code & write to state
                 const hmsError = [];
@@ -813,6 +799,62 @@ class Bambulab extends utils.Adapter {
             );
         } else if (days != null && days <= 14) {
             this.log.warn(`Cloud Access Token läuft in ca. ${days} Tag(en) ab – rechtzeitig neu anmelden.`);
+        }
+    }
+
+    /** H2D: zwei LED-Leisten (chamber_light + chamber_light2), sonst eine. */
+    usesDualChamberLights() {
+        return /^H2D/i.test(this.config.printerModel || '');
+    }
+
+    chamberLightLedNodes() {
+        return this.usesDualChamberLights() ? ['chamber_light', 'chamber_light2'] : ['chamber_light'];
+    }
+
+    buildChamberLedCtrlMessage(ledNode, turnOn) {
+        return {
+            system: {
+                sequence_id: '2003',
+                command: 'ledctrl',
+                led_node: ledNode,
+                led_mode: turnOn ? 'on' : 'off',
+                led_on_time: 500,
+                led_off_time: 500,
+                loop_times: 0,
+                interval_time: 0,
+            },
+        };
+    }
+
+    /** Ein Schalter: alle Kammer-LED-Kanäle des Modells schalten (wie Bambu-App). */
+    publishChamberLightCommand(turnOn) {
+        for (const node of this.chamberLightLedNodes()) {
+            this.publishMQTTmessages(this.buildChamberLedCtrlMessage(node, turnOn));
+        }
+    }
+
+    /**
+     * lights_report → control.lightChamber (Schreib-State spiegelt MQTT).
+     * H2D: mindestens eine Kammer-LED „on“ → true; alle Kammer-LEDs „off“ → false.
+     */
+    syncChamberLightControlState(print) {
+        if (!print || !Array.isArray(print.lights_report)) {
+            return;
+        }
+        const nodes = new Set(this.chamberLightLedNodes());
+        const chamberLights = print.lights_report.filter(
+            entry => entry && nodes.has(entry.node),
+        );
+        if (!chamberLights.length) {
+            return;
+        }
+        if (!print.control) {
+            print.control = {};
+        }
+        const anyOn = chamberLights.some(entry => entry.mode === 'on' || entry.mode === 'flashing');
+        print.control.lightChamber = anyOn;
+        for (const entry of chamberLights) {
+            entry.mode = entry.mode === 'on' || entry.mode === 'flashing';
         }
     }
 
@@ -1162,33 +1204,11 @@ class Bambulab extends utils.Adapter {
                         break;
                     case 'lightChamber':
                         if (state.val === true) {
-                            msg = {
-                                system: {
-                                    sequence_id: '2003',
-                                    command: 'ledctrl',
-                                    led_node: 'chamber_light',
-                                    led_mode: 'on',
-                                    led_on_time: 500,
-                                    led_off_time: 500,
-                                    loop_times: 0,
-                                    interval_time: 0,
-                                },
-                            };
+                            this.publishChamberLightCommand(true);
                         } else if (state.val === false) {
-                            msg = {
-                                system: {
-                                    sequence_id: '2003',
-                                    command: 'ledctrl',
-                                    led_node: 'chamber_light',
-                                    led_mode: 'off',
-                                    led_on_time: 500,
-                                    led_off_time: 500,
-                                    loop_times: 0,
-                                    interval_time: 0,
-                                },
-                            };
+                            this.publishChamberLightCommand(false);
                         }
-                        break;
+                        return;
                     case 'lightToolHeadLogo':
                         if (state.val === true) {
                             msg = msg = {
