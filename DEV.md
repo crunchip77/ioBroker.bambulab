@@ -60,3 +60,46 @@ Danach Instanz **bambulab.0** neu starten (bei Cloud-Updates **kein** Token leer
 
 - State: `bambulab.0.info.connection`
 - Log-Level `info` reicht; H2D: weniger Spam ab cloud.12
+
+## H2D Datenpunkte – Audit (Stand cloud.15)
+
+**Serial-Ordner:** `bambulab.0.<serial>.*` – bei H2D kommen viele Felder unter `device.*` per jsonExplorer automatisch an (575+ States). Nur dokumentierte `state_attr`-Einträge haben schöne Namen/Rollen; der Rest ist lesbar, aber oft generisch benannt.
+
+### Lesen – ok / bekannt
+
+| Bereich | ioBroker-Pfad (Beispiel) | Hinweis |
+|---------|--------------------------|---------|
+| Druckstatus | `print.gcode_state`, `print.mc_percent`, `print.mc_remaining_time` | `stg_cur` wird als Text-Phase angezeigt (Bug Doppel-Konvertierung in .15 behoben) |
+| Dual-Extruder | `device.extruder.info.0/1.temp`, Höhen, Speed | Roh-Temperaturen >500 werden ab .15 in °C umgerechnet |
+| Airduct / Lüfter | `device.airduct.*`, `print.big_fan*_speed` | Prozent über `convert.fanSpeed`; H2D-Lüftungslogik liegt in `device.airduct`, nicht nur in `print.*` |
+| AMS / Tray | `ams.*`, `vt_tray` | wie P1/X1 |
+| HMS / Fehler | `print.hms.*` | Übersetzung wenn JSON geladen |
+| Kamera / Laser-Cam | `device.cam.*` | **kein Live-Stream** (Adapter-Limit) |
+
+### Steuern – funktioniert (Cloud/LAN)
+
+| State unter `…control.*` | Aktion |
+|--------------------------|--------|
+| `pause`, `stop`, `resume` | MQTT print commands |
+| `lightChamber` | H2D: `chamber_light` + `chamber_light2` |
+| `lightWorkHead` | **neu ab .15:** `work_light` per `ledctrl` |
+| `big_fan1_speed`, `big_fan2_speed`, `cooling_fan_speed` | G-code M106 P2/P3/P1 |
+| `heatbreak_fan_speed` | **neu ab .15:** M106 P4 (manuell testen am H2D) |
+| `bed_target_temper`, `nozzle_target_temper` | M140 / M104 – **nur eine** Soll-Düse, kein getrenntes L/R |
+| `spd_lvl` | print_speed |
+| `gcode` | G-code-Zeile (Sperre bei aktivem Druck) |
+| `lightToolHeadLogo` | M960 (Logo-Licht, nicht Werklicht) |
+
+### Kosmetik / Legacy
+
+- `fanSpeedChamber` – alter Name, Handler bleibt (P3); aktiver State heißt `big_fan2_speed`.
+- Viele `device.*`-States ohne `state_attr` – Werte stimmen, Namen/Rollen oft „roh“.
+
+### Bewusst nicht / fehlt
+
+- Live-Kamera, Bambu Studio, 2FA-Login
+- Getrennte Soll-Temperatur Extruder L/R (nur `nozzle_target_temper` + `device.extruder.info.*.temp` lesen)
+- Airduct-Modi schreiben (nur Anzeige der MQTT-Struktur)
+- Vollständige H2D-`state_attr`-Map (Phase 4/Doku)
+
+Nach Deploy `.15`: Instanz neu starten; optional alte `control.stg_cur`-Werte einmal aktualisieren lassen (pushall).

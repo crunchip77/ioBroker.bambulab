@@ -510,46 +510,8 @@ class Bambulab extends utils.Adapter {
             }
 
             if (message.print) {
-                try {
-                    this.log.debug(`Extruder R temp: ${message.print.device.extruder.info[0].temp}`);
-                } catch {
-                    // Ignore if extruder info is not available
-                }
-
-                try {
-                    this.log.debug(
-                        `Extruder R temp decoded: ${decodeExtruderTemp(message.print.device.extruder.info[0].temp)}`,
-                    );
-                } catch {
-                    // Ignore if extruder info is not available
-                }
-
-                try {
-                    this.log.debug(`Extruder L temp: ${message.print.device.extruder.info[1].temp}`);
-                } catch {
-                    // Ignore if extruder info is not available
-                }
-
-                try {
-                    this.log.debug(
-                        `Extruder L temp decoded: ${decodeExtruderTemp(message.print.device.extruder.info[1].temp)}`,
-                    );
-                } catch {
-                    // Ignore if extruder info is not available
-                }
-
-                try {
-                    this.log.debug(`Nozzel temp: ${decodeExtruderTemp(message.print.nozzle_temper)}`);
-                } catch {
-                    // Ignore if nozzle_temper is not available
-                }
-
-                function decodeExtruderTemp(raw) {
-                    if (raw > 500) {
-                        return Math.round(raw / 58100);
-                    }
-                    return raw; // Already realistic
-                }
+                // H2D meldet Düsen-Temperaturen oft als große Rohwerte – vor jsonExplorer normalisieren
+                this.normalizeH2dPrintTemperatures(message.print);
 
                 // Modify values of JSON for states which need modification
                 message.print.control = {};
@@ -568,8 +530,9 @@ class Bambulab extends utils.Adapter {
                 currentPrintingState = originalStgCur;
 
                 if (message.print.stg_cur != null) {
-                    message.print.stg_cur = convert.stageParser(message.print.stg_cur);
-                    message.print.control.stg_cur = convert.stageParser(message.print.stg_cur);
+                    const stgCurLabel = convert.stageParser(originalStgCur);
+                    message.print.stg_cur = stgCurLabel;
+                    message.print.control.stg_cur = stgCurLabel;
                 }
                 if (message.print.big_fan1_speed != null) {
                     message.print.big_fan1_speed = convert.fanSpeed(message.print.big_fan1_speed);
@@ -617,8 +580,8 @@ class Bambulab extends utils.Adapter {
                 if (message.print.vt_tray != null && message.print.vt_tray.bed_temp != null) {
                     message.print.vt_tray.bed_temp = +message.print.vt_tray.bed_temp;
                 }
-                // Kammerlicht-Status für control.lightChamber (H2D: links + rechts)
-                this.syncChamberLightControlState(message.print);
+                // lights_report → Schreib-States (Kammer + Werklicht)
+                this.syncLightsReportToControl(message.print);
 
                 // Translate HMS Code & write to state
                 const hmsError = [];
@@ -802,6 +765,37 @@ class Bambulab extends utils.Adapter {
         }
     }
 
+    /** H2D meldet Düsen-Temperaturen teils als Encoder-Rohwert (>500) statt °C. */
+    decodeExtruderTempValue(raw) {
+        if (raw == null || typeof raw !== 'number') {
+            return raw;
+        }
+        if (raw > 500) {
+            return Math.round(raw / 58100);
+        }
+        return raw;
+    }
+
+    normalizeH2dPrintTemperatures(print) {
+        if (!/^H2D/i.test(this.config.printerModel || '') || !print) {
+            return;
+        }
+        const infos = print.device?.extruder?.info;
+        if (Array.isArray(infos)) {
+            for (const ex of infos) {
+                if (ex && ex.temp != null) {
+                    ex.temp = this.decodeExtruderTempValue(ex.temp);
+                }
+            }
+        }
+        if (print.nozzle_temper != null) {
+            print.nozzle_temper = this.decodeExtruderTempValue(print.nozzle_temper);
+        }
+        if (print.nozzle_target_temper != null) {
+            print.nozzle_target_temper = this.decodeExtruderTempValue(print.nozzle_target_temper);
+        }
+    }
+
     /** H2D: zwei LED-Leisten (chamber_light + chamber_light2), sonst eine. */
     usesDualChamberLights() {
         return /^H2D/i.test(this.config.printerModel || '');
@@ -834,27 +828,32 @@ class Bambulab extends utils.Adapter {
     }
 
     /**
-     * lights_report → control.lightChamber (Schreib-State spiegelt MQTT).
-     * H2D: mindestens eine Kammer-LED „on“ → true; alle Kammer-LEDs „off“ → false.
+     * lights_report → control.* (Schreib-States spiegeln MQTT).
+     * H2D Kammer: mindestens eine LED „on“ → lightChamber true.
+     * Werklicht: node work_light → lightWorkHead.
      */
-    syncChamberLightControlState(print) {
+    syncLightsReportToControl(print) {
         if (!print || !Array.isArray(print.lights_report)) {
-            return;
-        }
-        const nodes = new Set(this.chamberLightLedNodes());
-        const chamberLights = print.lights_report.filter(
-            entry => entry && nodes.has(entry.node),
-        );
-        if (!chamberLights.length) {
             return;
         }
         if (!print.control) {
             print.control = {};
         }
-        const anyOn = chamberLights.some(entry => entry.mode === 'on' || entry.mode === 'flashing');
-        print.control.lightChamber = anyOn;
-        for (const entry of chamberLights) {
-            entry.mode = entry.mode === 'on' || entry.mode === 'flashing';
+
+        const nodes = new Set(this.chamberLightLedNodes());
+        const chamberLights = print.lights_report.filter(entry => entry && nodes.has(entry.node));
+        if (chamberLights.length) {
+            const anyOn = chamberLights.some(entry => entry.mode === 'on' || entry.mode === 'flashing');
+            print.control.lightChamber = anyOn;
+            for (const entry of chamberLights) {
+                entry.mode = entry.mode === 'on' || entry.mode === 'flashing';
+            }
+        }
+
+        const workLight = print.lights_report.find(entry => entry && entry.node === 'work_light');
+        if (workLight) {
+            print.control.lightWorkHead = workLight.mode === 'on' || workLight.mode === 'flashing';
+            workLight.mode = workLight.mode === 'on' || workLight.mode === 'flashing';
         }
     }
 
@@ -1209,6 +1208,13 @@ class Bambulab extends utils.Adapter {
                             this.publishChamberLightCommand(false);
                         }
                         return;
+                    case 'lightWorkHead':
+                        if (state.val === true || state.val === false) {
+                            this.publishMQTTmessages(
+                                this.buildChamberLedCtrlMessage('work_light', state.val === true),
+                            );
+                        }
+                        return;
                     case 'lightToolHeadLogo':
                         if (state.val === true) {
                             msg = msg = {
@@ -1256,6 +1262,7 @@ class Bambulab extends utils.Adapter {
                         };
                         break;
                     case 'fanSpeedChamber':
+                        // Legacy-State-Name (P1/X1); aktuelle States heißen big_fan2_speed
                         msg = {
                             print: {
                                 command: 'gcode_line',
@@ -1263,7 +1270,15 @@ class Bambulab extends utils.Adapter {
                                 sequence_id: '0',
                             },
                         };
-
+                        break;
+                    case 'heatbreak_fan_speed':
+                        msg = {
+                            print: {
+                                command: 'gcode_line',
+                                param: `M106 P4 S${state.val * 2.55} \n`,
+                                sequence_id: '0',
+                            },
+                        };
                         break;
                     case 'spd_lvl':
                         msg = {
