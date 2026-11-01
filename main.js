@@ -85,6 +85,10 @@ class Bambulab extends utils.Adapter {
 
         // Cloud-JWT aus Datei (Native-Verschlüsselung kann das MQTT-Passwort nach Neustart ungültig machen)
         await this.loadCloudCredentialsFromFile();
+        if ((this.config.cloudUserId || '').trim()) {
+            cloudUserId = String(this.config.cloudUserId).trim();
+        }
+        this.warnCloudTokenExpiry();
 
         // Handle MQTT messages (async: Cloud braucht vorher Login)
         this.mqttMessageHandle().catch(err => {
@@ -762,7 +766,58 @@ class Bambulab extends utils.Adapter {
         return amsData;
     }
 
+    /**
+     * Bambu user_id für pushall / system-Befehle (Cloud: aus Login, LAN: Platzhalter wie bisher).
+     */
+    mqttCommandUserId() {
+        const fromConfig = cloudUserId || String(this.config.cloudUserId || '').trim();
+        if (fromConfig) {
+            return fromConfig;
+        }
+        return '1234567890';
+    }
+
+    /** Cloud-MQTT: user_id an Wurzel setzen, wo Bambu es erwartet (nicht fest verdrahtet). */
+    applyMqttUserId(msg) {
+        if (!msg || (this.config.connectionMode || 'lan') !== 'cloud') {
+            return msg;
+        }
+        const uid = this.mqttCommandUserId();
+        if (uid === '1234567890') {
+            this.log.warn(
+                'Cloud: user_id fehlt – Steuerbefehle können fehlschlagen. Einmal Cloud-Login (E-Mail-Code) durchführen.',
+            );
+        }
+        if (msg.user_id == null) {
+            msg.user_id = uid;
+        }
+        if (msg.print && msg.print.user_id == null) {
+            msg.print.user_id = uid;
+        }
+        return msg;
+    }
+
+    /** Vor Ablauf des Cloud-JWT warnen (kein Auto-Refresh – Nutzer meldet sich neu an). */
+    warnCloudTokenExpiry() {
+        if ((this.config.connectionMode || 'lan') !== 'cloud') {
+            return;
+        }
+        const token = (this.config.cloudAccessToken || '').trim();
+        if (!token) {
+            return;
+        }
+        const days = bambuCloud.accessTokenDaysUntilExpiry(token);
+        if (days === 0) {
+            this.log.warn(
+                'Cloud Access Token ist abgelaufen (JWT) – Token leeren, speichern, Instanz starten, E-Mail-Code eintragen.',
+            );
+        } else if (days != null && days <= 14) {
+            this.log.warn(`Cloud Access Token läuft in ca. ${days} Tag(en) ab – rechtzeitig neu anmelden.`);
+        }
+    }
+
     publishMQTTmessages(msg) {
+        msg = this.applyMqttUserId(msg);
         this.log.debug(`Publish message ${JSON.stringify(msg)}`);
 
         const topic = `device/${this.config.serial}/request`;
@@ -775,15 +830,13 @@ class Bambulab extends utils.Adapter {
 
     requestData() {
         // Cloud: echte Bambu-user_id; LAN: Platzhalter reicht oft, Cloud eher nicht
-        const user_id = cloudUserId || '1234567890';
-
         // Prepare MQTT message
         const msg = {
             pushing: {
                 sequence_id: '1',
                 command: 'pushall',
             },
-            user_id,
+            user_id: this.mqttCommandUserId(),
         };
 
         // Try to request data
@@ -1120,7 +1173,6 @@ class Bambulab extends utils.Adapter {
                                     loop_times: 0,
                                     interval_time: 0,
                                 },
-                                user_id: '2712364565',
                             };
                         } else if (state.val === false) {
                             msg = {
@@ -1263,7 +1315,6 @@ class Bambulab extends utils.Adapter {
                                 reason: 'SUCCESS',
                                 result: 'SUCCESS',
                                 sequence_id: '20086',
-                                user_id: '1767420324',
                             },
                         };
                         break;
