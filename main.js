@@ -83,6 +83,21 @@ class Bambulab extends utils.Adapter {
             );
         }
 
+        if ((this.config.connectionMode || 'lan') === 'cloud') {
+            await this.setObjectNotExistsAsync('control.cloudRequestEmailCode', {
+                type: 'state',
+                common: {
+                    name: 'Cloud: E-Mail-Code erneut anfordern',
+                    type: 'boolean',
+                    role: 'button',
+                    read: false,
+                    write: true,
+                },
+                native: {},
+            });
+            await this.subscribeStatesAsync('control.cloudRequestEmailCode');
+        }
+
         // Cloud-JWT aus Datei (Native-Verschlüsselung kann das MQTT-Passwort nach Neustart ungültig machen)
         await this.loadCloudCredentialsFromFile();
         if ((this.config.cloudUserId || '').trim()) {
@@ -116,7 +131,13 @@ class Bambulab extends utils.Adapter {
         } catch {
             // State evtl. noch nicht angelegt
         }
-        return bambuCloud.buildMqttConnect({ ...this.config, cloudEmailCodeRequestedAt }, logFn);
+        const connectConfig = {
+            ...this.config,
+            cloudEmailCodeRequestedAt,
+            forceCloudEmailCodeRequest: !!this._forceCloudEmailCodeRequest,
+        };
+        this._forceCloudEmailCodeRequest = false;
+        return bambuCloud.buildMqttConnect(connectConfig, logFn);
     }
 
     /** Merkt Zeitpunkt der letzten Code-Mail (State, kein Native-Update → kein Instanz-Neustart). */
@@ -343,6 +364,9 @@ class Bambulab extends utils.Adapter {
             } else if (e instanceof bambuCloud.BambuCloudAuthError && e.code === 'codeExpired') {
                 this.log.warn(`${e.message} Alten Code aus der Config entfernen und neue Mail anfordern…`);
                 await this.recoverFromExpiredEmailCode();
+            } else if (e instanceof bambuCloud.BambuCloudAuthError && e.code === 'emailCodeFailed') {
+                this.log.error(e.message || e);
+                clientConnection.cloudAuthHold = true;
             } else if (e instanceof bambuCloud.BambuCloudAuthError && e.code === 'tokenInvalid') {
                 this.log.error(e.message || e);
                 this.config.cloudAccessToken = '';
@@ -524,7 +548,7 @@ class Bambulab extends utils.Adapter {
         await this.clearCloudEmailRequestMarker();
         clientConnection.cloudAuthHold = false;
         this.log.info(
-            'Cloud: Token in lokaler Datei gespeichert, MQTT-User in Config – Neustarts ohne neue Mail (bis Bambu das Token ungültig macht).',
+            `Cloud: Token in ${this.cloudCredentialsFilePath()} gespeichert, MQTT-User in Config – künftig kein E-Mail-Code bei Neustart/url (bis JWT abläuft).`,
         );
     }
 
@@ -541,6 +565,19 @@ class Bambulab extends utils.Adapter {
      * Code löschen, Cooldown zurücksetzen, direkt neue Mail auslösen (ohne manuelles Admin-Leeren).
      */
     async recoverFromExpiredEmailCode() {
+        await this.forceCloudEmailCodeRequest();
+    }
+
+    /** Cooldown umgehen, alten Code verwerfen, Bambu sendemail/code direkt aufrufen. */
+    async forceCloudEmailCodeRequest() {
+        if ((this.config.connectionMode || 'lan') !== 'cloud') {
+            return;
+        }
+        const email = (this.config.cloudEmail || '').trim();
+        if (!email) {
+            this.log.error('Cloud: Bambu-E-Mail (cloudEmail) fehlt – keine Code-Mail möglich.');
+            return;
+        }
         this.config.cloudVerifyCode = '';
         clientConnection.cloudAuthHold = false;
         clientConnection.initiated = false;
@@ -549,9 +586,10 @@ class Bambulab extends utils.Adapter {
             await this.clearCloudVerifyCode();
         } catch (err) {
             this.log.warn(
-                `Cloud: Alten Code nicht in Native speicherbar (${err.message || err}) – Feld „Cloud E-Mail verification code“ im Admin leeren, speichern, neu starten.`,
+                `Cloud: Alten Code nicht in Native speicherbar (${err.message || err}) – Feld im Admin leeren, speichern.`,
             );
         }
+        this._forceCloudEmailCodeRequest = true;
         try {
             await this.mqttMessageHandle();
         } catch (retryErr) {
@@ -560,8 +598,8 @@ class Bambulab extends utils.Adapter {
                 (retryErr.code === 'verifyCodeSent' || retryErr.code === 'verifyCodePending')
             ) {
                 this.log.warn(retryErr.message || retryErr);
-            } else {
-                this.log.error(`Cloud: Neue E-Mail konnte nicht angefordert werden: ${retryErr.message || retryErr}`);
+            } else if (!(retryErr instanceof bambuCloud.BambuCloudAuthError)) {
+                this.log.error(`Cloud: E-Mail-Anforderung fehlgeschlagen: ${retryErr.message || retryErr}`);
             }
         }
     }
@@ -1267,6 +1305,11 @@ class Bambulab extends utils.Adapter {
                 }
 
                 switch (checkID[stateLocation]) {
+                    case 'cloudRequestEmailCode':
+                        if (state.val) {
+                            await this.forceCloudEmailCodeRequest();
+                        }
+                        return;
                     case '_customGcode':
                         // Check if this G-code command should be blocked during printing
                         if (this.shouldBlockGcodeCommand(state.val)) {
