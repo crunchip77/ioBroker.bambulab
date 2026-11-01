@@ -341,11 +341,8 @@ class Bambulab extends utils.Adapter {
                 this.log.error(e.message || e);
                 clientConnection.cloudAuthHold = true;
             } else if (e instanceof bambuCloud.BambuCloudAuthError && e.code === 'codeExpired') {
-                this.log.error(`${e.message}`);
-                clientConnection.cloudAuthHold = true;
-                this.log.warn(
-                    'E-Mail-Code in der Admin-Config leeren, speichern, Instanz neu starten (eine neue Mail), neuen Code eintragen.',
-                );
+                this.log.warn(`${e.message} Alten Code aus der Config entfernen und neue Mail anfordern…`);
+                await this.recoverFromExpiredEmailCode();
             } else if (e instanceof bambuCloud.BambuCloudAuthError && e.code === 'tokenInvalid') {
                 this.log.error(e.message || e);
                 this.config.cloudAccessToken = '';
@@ -537,6 +534,36 @@ class Bambulab extends utils.Adapter {
             return;
         }
         await this.mergeCloudNativePatch({ cloudVerifyCode: '' });
+    }
+
+    /**
+     * Bambu lehnt abgelaufene Codes ab, solange sie noch in cloudVerifyCode stehen wird keine neue Mail angefordert.
+     * Code löschen, Cooldown zurücksetzen, direkt neue Mail auslösen (ohne manuelles Admin-Leeren).
+     */
+    async recoverFromExpiredEmailCode() {
+        this.config.cloudVerifyCode = '';
+        clientConnection.cloudAuthHold = false;
+        clientConnection.initiated = false;
+        await this.clearCloudEmailRequestMarker();
+        try {
+            await this.clearCloudVerifyCode();
+        } catch (err) {
+            this.log.warn(
+                `Cloud: Alten Code nicht in Native speicherbar (${err.message || err}) – Feld „Cloud E-Mail verification code“ im Admin leeren, speichern, neu starten.`,
+            );
+        }
+        try {
+            await this.mqttMessageHandle();
+        } catch (retryErr) {
+            if (
+                retryErr instanceof bambuCloud.BambuCloudAuthError &&
+                (retryErr.code === 'verifyCodeSent' || retryErr.code === 'verifyCodePending')
+            ) {
+                this.log.warn(retryErr.message || retryErr);
+            } else {
+                this.log.error(`Cloud: Neue E-Mail konnte nicht angefordert werden: ${retryErr.message || retryErr}`);
+            }
+        }
     }
 
     /**
