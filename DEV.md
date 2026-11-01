@@ -90,7 +90,8 @@ Danach Instanz **bambulab.0** neu starten (bei Cloud-Updates **kein** Token leer
 | `bed_target_temper`, `nozzle_target_temper` | M140 / M104 – **nur eine** Soll-Düse, kein getrenntes L/R |
 | `spd_lvl` | print_speed |
 | `gcode` | G-code-Zeile (Sperre bei aktivem Druck) |
-| `lightToolHeadLogo` | M960 (Logo-Licht, nicht Werklicht) |
+| `lightToolHeadLogo` | X/P: M960; **H2D:** `ledctrl` `chamber_light2` (kein M960-Logo) |
+| `lightWorkHead` | **H2D:** `ledctrl` `work_light` mit Zeiten 0 (nicht Kammer-500 ms) |
 
 ### Kosmetik / Legacy
 

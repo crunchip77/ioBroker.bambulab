@@ -57,6 +57,10 @@ class Bambulab extends utils.Adapter {
         this.on('stateChange', this.onStateChange.bind(this));
         this.on('unload', this.onUnload.bind(this));
         jsonExplorer.init(this, stateAttr);
+        /** Fortlaufende sequence_id – manche Befehle lehnen ständig „0“ ab */
+        this.mqttPublishSeq = 0;
+        /** H2D Luftkanal-Modus (0=Kühl) – vor M106-Lüftern ggf. set_airduct */
+        this.h2dAirductModeCur = null;
     }
 
     /**
@@ -277,6 +281,7 @@ class Bambulab extends utils.Adapter {
                 message = JSON.parse(message.toString());
 
                 // @ts-expect-error if print does not exist function will return false and skip
+                this.logMqttControlReport(message);
                 if (message && message.print && message && message.print.result) {
                     // Handle values for printer statistics
                     this.log.debug(`Printer message result ${JSON.stringify(message)}`);
@@ -638,6 +643,10 @@ class Bambulab extends utils.Adapter {
             }
 
             if (message.print) {
+                const airduct = message.print.device && message.print.device.airduct;
+                if (airduct && airduct.modeCur != null && this.isH2dPrinter()) {
+                    this.h2dAirductModeCur = airduct.modeCur;
+                }
                 // H2D meldet Düsen-Temperaturen oft als große Rohwerte – vor jsonExplorer normalisieren
                 this.normalizeH2dPrintTemperatures(message.print);
 
@@ -854,7 +863,10 @@ class Bambulab extends utils.Adapter {
         return '1234567890';
     }
 
-    /** Cloud-MQTT: user_id an Wurzel setzen, wo Bambu es erwartet (nicht fest verdrahtet). */
+    /**
+     * Cloud: user_id nur in print.* (OpenBambu/HA) – nicht an system.ledctrl (Kammer funktioniert ohne).
+     * Zusätzliche user_id an der Wurzel kann print.gcode_line am H2D ablehnen.
+     */
     applyMqttUserId(msg) {
         if (!msg || (this.config.connectionMode || 'lan') !== 'cloud') {
             return msg;
@@ -865,19 +877,33 @@ class Bambulab extends utils.Adapter {
                 'Cloud: user_id fehlt – Steuerbefehle können fehlschlagen. Einmal Cloud-Login (E-Mail-Code) durchführen.',
             );
         }
-        if (msg.user_id == null) {
-            msg.user_id = uid;
-        }
         if (msg.print && msg.print.user_id == null) {
             msg.print.user_id = uid;
         }
-        if (msg.pushing && msg.pushing.user_id == null) {
-            msg.pushing.user_id = uid;
-        }
-        if (msg.system && msg.system.user_id == null) {
-            msg.system.user_id = uid;
-        }
         return msg;
+    }
+
+    nextMqttSequenceId() {
+        this.mqttPublishSeq = (this.mqttPublishSeq + 1) % 100000;
+        return String(this.mqttPublishSeq);
+    }
+
+    /** Drucker-Antwort auf Steuerbefehl (Fehler → Warnung im Log). */
+    logMqttControlReport(message) {
+        if (!message) {
+            return;
+        }
+        const sys = message.system;
+        if (sys && sys.command === 'ledctrl') {
+            const result = sys.result || sys.reason || sys.msg;
+            if (result != null && String(result).toUpperCase() !== 'SUCCESS') {
+                this.log.warn(`LED ${sys.led_node || '?'}: ${result}`);
+            }
+        }
+        const pr = message.print;
+        if (pr && pr.result != null && String(pr.result).toUpperCase() !== 'SUCCESS') {
+            this.log.warn(`print.${pr.command || '?'}: ${pr.result}`);
+        }
     }
 
     /** Vor Ablauf des Cloud-JWT warnen (kein Auto-Refresh – Nutzer meldet sich neu an). */
@@ -957,11 +983,46 @@ class Bambulab extends utils.Adapter {
     buildPrintGcodeLineMessage(gcodeParam) {
         return {
             print: {
-                sequence_id: '0',
+                sequence_id: this.nextMqttSequenceId(),
                 command: 'gcode_line',
                 param: gcodeParam,
             },
         };
+    }
+
+    buildPrintCommand(fields) {
+        return {
+            print: {
+                sequence_id: this.nextMqttSequenceId(),
+                ...fields,
+            },
+        };
+    }
+
+    /** H2D: Lüfter laufen im Kühl-Luftkanal (modeId 0) – sonst oft „MQTT fehlgeschlagen“. */
+    buildSetAirductMessage(modeId) {
+        return this.buildPrintCommand({
+            command: 'set_airduct',
+            modeId,
+            submode: -1,
+        });
+    }
+
+    ensureH2dCoolingAirductForFans() {
+        if (!this.isH2dPrinter()) {
+            return;
+        }
+        if (this.h2dAirductModeCur != null && this.h2dAirductModeCur !== 0) {
+            this.log.info(`H2D Luftkanal ${this.h2dAirductModeCur} → Kühlmodus (0) vor Lüfter-G-code`);
+            this.publishMQTTmessages(this.buildSetAirductMessage(0));
+        }
+    }
+
+    publishFanSpeedCommand(fanP, percent, logLabel) {
+        this.ensureH2dCoolingAirductForFans();
+        const msg = this.buildPrintGcodeLineMessage(this.buildFanSpeedGcode(fanP, percent));
+        this.log.info(`${logLabel} → ${percent}% (M106 P${fanP})`);
+        this.publishMQTTmessages(msg);
     }
 
     /** State-Name aus …control.<name> (Serial-Ordner oder Instanz-control). */
@@ -980,6 +1041,9 @@ class Bambulab extends utils.Adapter {
             return;
         }
         const names = [
+            'lightChamber',
+            'lightWorkHead',
+            'lightToolHeadLogo',
             'cooling_fan_speed',
             'heatbreak_fan_speed',
             'big_fan1_speed',
@@ -1000,7 +1064,7 @@ class Bambulab extends utils.Adapter {
     buildChamberLedCtrlMessage(ledNode, turnOn) {
         return {
             system: {
-                sequence_id: '2003',
+                sequence_id: this.nextMqttSequenceId(),
                 command: 'ledctrl',
                 led_node: ledNode,
                 led_mode: turnOn ? 'on' : 'off',
@@ -1010,6 +1074,30 @@ class Bambulab extends utils.Adapter {
                 interval_time: 0,
             },
         };
+    }
+
+    /**
+     * Werklicht (work_light): wie HA heatbed_light – Zeiten 0 (Kammer-LED nutzt 500 ms).
+     * Kammer und Werklicht teilen sich sonst dasselbe JSON; nur die Zeiten unterscheiden sich.
+     */
+    buildWorkHeadLedCtrlMessage(turnOn) {
+        return {
+            system: {
+                sequence_id: this.nextMqttSequenceId(),
+                command: 'ledctrl',
+                led_node: 'work_light',
+                led_mode: turnOn ? 'on' : 'off',
+                led_on_time: 0,
+                led_off_time: 0,
+                loop_times: 0,
+                interval_time: 0,
+            },
+        };
+    }
+
+    publishWorkHeadLightCommand(turnOn) {
+        this.log.info(`Werklicht (work_light) → ${turnOn ? 'an' : 'aus'}`);
+        this.publishMQTTmessages(this.buildWorkHeadLedCtrlMessage(turnOn));
     }
 
     /** Ein Schalter: alle Kammer-LED-Kanäle des Modells schalten (wie Bambu-App). */
@@ -1051,6 +1139,12 @@ class Bambulab extends utils.Adapter {
 
     publishMQTTmessages(msg) {
         msg = this.applyMqttUserId(msg);
+        const brief =
+            msg.system?.command ||
+            (msg.print && `${msg.print.command}${msg.print.param ? '' : ''}`) ||
+            msg.pushing?.command ||
+            'mqtt';
+        this.log.info(`MQTT → ${brief}`);
         this.log.debug(`Publish message ${JSON.stringify(msg)}`);
 
         const topic = `device/${this.config.serial}/request`;
@@ -1066,10 +1160,9 @@ class Bambulab extends utils.Adapter {
         // Prepare MQTT message
         const msg = {
             pushing: {
-                sequence_id: '1',
+                sequence_id: this.nextMqttSequenceId(),
                 command: 'pushall',
             },
-            user_id: this.mqttCommandUserId(),
         };
 
         // Try to request data
@@ -1412,28 +1505,26 @@ class Bambulab extends utils.Adapter {
                         return;
                     case 'lightWorkHead':
                         if (state.val === true || state.val === false) {
-                            this.publishMQTTmessages(
-                                this.buildChamberLedCtrlMessage('work_light', state.val === true),
-                            );
+                            this.publishWorkHeadLightCommand(state.val === true);
                         }
                         return;
                     case 'lightToolHeadLogo':
+                        if (this.isH2dPrinter()) {
+                            // H2D: kein M960-Logo in lights_report – zweite Kammer-LED (chamber_light2) ansteuern
+                            if (state.val === true || state.val === false) {
+                                this.log.info(
+                                    `H2D Logo-State → chamber_light2 (kein M960; separates Logo gibt es am H2D nicht)`,
+                                );
+                                this.publishMQTTmessages(
+                                    this.buildChamberLedCtrlMessage('chamber_light2', state.val === true),
+                                );
+                            }
+                            return;
+                        }
                         if (state.val === true) {
-                            msg = msg = {
-                                print: {
-                                    command: 'gcode_line',
-                                    param: `M960 S5 P1 \n`,
-                                    sequence_id: '0',
-                                },
-                            };
+                            msg = this.buildPrintGcodeLineMessage('M960 S5 P1\n');
                         } else if (state.val === false) {
-                            msg = msg = {
-                                print: {
-                                    command: 'gcode_line',
-                                    param: `M960 S5 P0 \n`,
-                                    sequence_id: '0',
-                                },
-                            };
+                            msg = this.buildPrintGcodeLineMessage('M960 S5 P0\n');
                         }
                         break;
                     case 'pause':
@@ -1464,20 +1555,22 @@ class Bambulab extends utils.Adapter {
                         };
                         break;
                     case 'fanSpeedChamber':
-                        msg = this.buildPrintGcodeLineMessage(this.buildFanSpeedGcode(3, state.val));
-                        break;
+                        this.publishFanSpeedCommand(3, state.val, 'Lüfter Kammer (fanSpeedChamber)');
+                        return;
                     case 'heatbreak_fan_speed':
-                        msg = this.buildPrintGcodeLineMessage(this.buildFanSpeedGcode(4, state.val));
-                        this.log.info(`Lüfter Heatbreak → ${state.val}% (M106 P4)`);
-                        break;
+                        if (this.isH2dPrinter()) {
+                            this.log.warn(
+                                'Heatbreak-Lüfter am H2D per MQTT meist nicht steuerbar (HA sendet kein M106 P4) – Befehl übersprungen.',
+                            );
+                            return;
+                        }
+                        this.publishFanSpeedCommand(4, state.val, 'Lüfter Heatbreak');
+                        return;
                     case 'spd_lvl':
-                        msg = {
-                            print: {
-                                command: 'print_speed',
-                                param: String(state.val),
-                                sequence_id: '0',
-                            },
-                        };
+                        msg = this.buildPrintCommand({
+                            command: 'print_speed',
+                            param: String(state.val),
+                        });
                         this.log.info(`Druck-Speed-Profil → Stufe ${state.val} (print_speed)`);
                         break;
                     case 'bed_target_temper':
@@ -1499,17 +1592,14 @@ class Bambulab extends utils.Adapter {
                         };
                         break;
                     case 'big_fan1_speed':
-                        msg = this.buildPrintGcodeLineMessage(this.buildFanSpeedGcode(2, state.val));
-                        this.log.info(`Lüfter AUX (big_fan1) → ${state.val}% (M106 P2)`);
-                        break;
+                        this.publishFanSpeedCommand(2, state.val, 'Lüfter AUX (big_fan1)');
+                        return;
                     case 'big_fan2_speed':
-                        msg = this.buildPrintGcodeLineMessage(this.buildFanSpeedGcode(3, state.val));
-                        this.log.info(`Lüfter Kammer (big_fan2) → ${state.val}% (M106 P3)`);
-                        break;
+                        this.publishFanSpeedCommand(3, state.val, 'Lüfter Kammer (big_fan2)');
+                        return;
                     case 'cooling_fan_speed':
-                        msg = this.buildPrintGcodeLineMessage(this.buildFanSpeedGcode(1, state.val));
-                        this.log.info(`Part-Cooling-Lüfter → ${state.val}% (M106 P1)`);
-                        break;
+                        this.publishFanSpeedCommand(1, state.val, 'Part-Cooling-Lüfter');
+                        return;
                     case 'homing':
                         // Block homing (G28) command during active printing/working state
                         if (this.isPrintingOrActiveState()) {
