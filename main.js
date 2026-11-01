@@ -250,8 +250,12 @@ class Bambulab extends utils.Adapter {
                     const payload = pendingCloudCredentialSave;
                     pendingCloudCredentialSave = null;
                     this.saveCloudCredentials(payload).catch(err => {
+                        const hint =
+                            err && err.code === 'ENOENT'
+                                ? 'Instanz-Datenordner fehlt (behoben ab cloud.21 mit mkdir) – bitte Adapter aktualisieren und einmal neu anmelden.'
+                                : 'Serial in Admin prüfen; ggf. E-Mail-Code erneut.';
                         this.log.error(
-                            `Cloud: Zugangsdaten nach Connect nicht speicherbar: ${err.message || err} – bitte Serial prüfen und erneut mit E-Mail-Code anmelden.`,
+                            `Cloud: Zugangsdaten nach Connect nicht speicherbar: ${err.message || err} – ${hint}`,
                         );
                     });
                 }
@@ -493,7 +497,10 @@ class Bambulab extends utils.Adapter {
             cloudUserId: cloudUserId != null ? String(cloudUserId).trim() : '',
             savedAt: Date.now(),
         };
-        await fs.writeFile(this.cloudCredentialsFilePath(), JSON.stringify(payload), {
+        const filePath = this.cloudCredentialsFilePath();
+        // Docker/Neuinstallation: iobroker-data/bambulab.0/ existiert oft noch nicht
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+        await fs.writeFile(filePath, JSON.stringify(payload), {
             encoding: 'utf8',
             mode: 0o600,
         });
