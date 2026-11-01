@@ -899,6 +899,12 @@ class Bambulab extends utils.Adapter {
             if (result != null && String(result).toUpperCase() !== 'SUCCESS') {
                 this.log.warn(`LED ${sys.led_node || '?'}: ${result}`);
             }
+            // H2D: heatbed_light steht selten in lights_report – bei Erfolg den Schreib-State aktualisieren
+            const workNode = this.workHeadLedNode();
+            if (sys.led_node === workNode && String(result).toUpperCase() === 'SUCCESS' && this.config.serial) {
+                const on = sys.led_mode === 'on' || sys.led_mode === 'flashing';
+                this.setState(`${this.config.serial}.control.lightWorkHead`, on, true).catch(() => {});
+            }
         }
         const pr = message.print;
         if (pr && pr.result != null && String(pr.result).toUpperCase() !== 'SUCCESS') {
@@ -966,6 +972,14 @@ class Bambulab extends utils.Adapter {
     }
 
     /**
+     * Werklicht-Knoten: H2D/H2-Serie nutzt heatbed_light (HA), X1 nutzt work_light.
+     * work_light am H2D zu schicken bewirkt nichts – daher Modell-abhängig wählen.
+     */
+    workHeadLedNode() {
+        return this.isH2dPrinter() ? 'heatbed_light' : 'work_light';
+    }
+
+    /**
      * Lüfter-Sollwert (0–100 %) → G-code S0–255 (wie ha-bambulab: 10 %-Schritte, ceil).
      * Format: "M106 P1 S127\n" – eine Zeile, kein M145 (Mehrzeiler löst am H2D oft „MQTT fehlgeschlagen“ aus).
      */
@@ -1013,13 +1027,40 @@ class Bambulab extends utils.Adapter {
             return;
         }
         if (this.h2dAirductModeCur != null && this.h2dAirductModeCur !== 0) {
-            this.log.info(`H2D Luftkanal ${this.h2dAirductModeCur} → Kühlmodus (0) vor Lüfter-G-code`);
+            this.log.info(`H2D Luftkanal ${this.h2dAirductModeCur} → Kühlmodus (0) vor Lüfter-Befehl`);
             this.publishMQTTmessages(this.buildSetAirductMessage(0));
         }
     }
 
+    /** H2D Cloud: gcode_line schlägt oft fehl → Bambu-Studio-Protokoll set_fan (fan_index 1–3). */
+    buildSetFanMessage(fanIndex, percent) {
+        let p = Number(percent);
+        if (Number.isNaN(p)) {
+            p = 0;
+        }
+        p = Math.round(p / 10) * 10;
+        p = Math.max(0, Math.min(100, p));
+        return this.buildPrintCommand({
+            command: 'set_fan',
+            fan_index: fanIndex,
+            speed: p,
+        });
+    }
+
+    /** M106 P-Nummer → set_fan fan_index (Part=1, AUX=2, Kammer=3). */
+    fanPToSetFanIndex(fanP) {
+        const map = { 1: 1, 2: 2, 3: 3, 10: 4 };
+        return map[fanP] != null ? map[fanP] : fanP;
+    }
+
     publishFanSpeedCommand(fanP, percent, logLabel) {
         this.ensureH2dCoolingAirductForFans();
+        if (this.isH2dPrinter()) {
+            const fanIndex = this.fanPToSetFanIndex(fanP);
+            this.log.info(`${logLabel} → ${percent}% (set_fan index ${fanIndex})`);
+            this.publishMQTTmessages(this.buildSetFanMessage(fanIndex, percent));
+            return;
+        }
         const msg = this.buildPrintGcodeLineMessage(this.buildFanSpeedGcode(fanP, percent));
         this.log.info(`${logLabel} → ${percent}% (M106 P${fanP})`);
         this.publishMQTTmessages(msg);
@@ -1081,11 +1122,12 @@ class Bambulab extends utils.Adapter {
      * Kammer und Werklicht teilen sich sonst dasselbe JSON; nur die Zeiten unterscheiden sich.
      */
     buildWorkHeadLedCtrlMessage(turnOn) {
+        const ledNode = this.workHeadLedNode();
         return {
             system: {
                 sequence_id: this.nextMqttSequenceId(),
                 command: 'ledctrl',
-                led_node: 'work_light',
+                led_node: ledNode,
                 led_mode: turnOn ? 'on' : 'off',
                 led_on_time: 0,
                 led_off_time: 0,
@@ -1096,7 +1138,8 @@ class Bambulab extends utils.Adapter {
     }
 
     publishWorkHeadLightCommand(turnOn) {
-        this.log.info(`Werklicht (work_light) → ${turnOn ? 'an' : 'aus'}`);
+        const ledNode = this.workHeadLedNode();
+        this.log.info(`Werklicht (${ledNode}) → ${turnOn ? 'an' : 'aus'}`);
         this.publishMQTTmessages(this.buildWorkHeadLedCtrlMessage(turnOn));
     }
 
@@ -1130,10 +1173,18 @@ class Bambulab extends utils.Adapter {
             }
         }
 
-        const workLight = print.lights_report.find(entry => entry && entry.node === 'work_light');
+        const workNode = this.workHeadLedNode();
+        const workLight = print.lights_report.find(entry => entry && entry.node === workNode);
         if (workLight) {
             print.control.lightWorkHead = workLight.mode === 'on' || workLight.mode === 'flashing';
             workLight.mode = workLight.mode === 'on' || workLight.mode === 'flashing';
+        } else if (this.isH2dPrinter()) {
+            // Fallback X1-Knoten, falls Firmware doch work_light meldet
+            const legacy = print.lights_report.find(entry => entry && entry.node === 'work_light');
+            if (legacy) {
+                print.control.lightWorkHead = legacy.mode === 'on' || legacy.mode === 'flashing';
+                legacy.mode = legacy.mode === 'on' || legacy.mode === 'flashing';
+            }
         }
     }
 
@@ -1510,13 +1561,13 @@ class Bambulab extends utils.Adapter {
                         return;
                     case 'lightToolHeadLogo':
                         if (this.isH2dPrinter()) {
-                            // H2D: kein M960-Logo in lights_report – zweite Kammer-LED (chamber_light2) ansteuern
+                            // H2D: kein Toolhead-Logo – linke Kammerleiste einzeln (rechts = chamber_light2 / oft schon lightChamber)
                             if (state.val === true || state.val === false) {
                                 this.log.info(
-                                    `H2D Logo-State → chamber_light2 (kein M960; separates Logo gibt es am H2D nicht)`,
+                                    `H2D: Logo-State → linke Kammer-LED (chamber_light); rechte Leiste = lightChamber oder App`,
                                 );
                                 this.publishMQTTmessages(
-                                    this.buildChamberLedCtrlMessage('chamber_light2', state.val === true),
+                                    this.buildChamberLedCtrlMessage('chamber_light', state.val === true),
                                 );
                             }
                             return;

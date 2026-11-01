@@ -84,13 +84,13 @@ Danach Instanz **bambulab.0** neu starten (bei Cloud-Updates **kein** Token leer
 |--------------------------|--------|
 | `pause`, `stop`, `resume` | MQTT print commands |
 | `lightChamber` | H2D: `chamber_light` + `chamber_light2` |
-| `lightWorkHead` | **neu ab .15:** `work_light` per `ledctrl` |
-| `big_fan1_speed`, `big_fan2_speed`, `cooling_fan_speed` | G-code M106 P2/P3/P1 |
+| `lightWorkHead` | `ledctrl`: H2D **`heatbed_light`**, sonst `work_light` |
+| `big_fan1_speed`, `big_fan2_speed`, `cooling_fan_speed` | LAN: M106; **H2D Cloud:** `print.set_fan` (fan_index 2/3/1) |
 | `heatbreak_fan_speed` | **neu ab .15:** M106 P4 (manuell testen am H2D) |
 | `bed_target_temper`, `nozzle_target_temper` | M140 / M104 – **nur eine** Soll-Düse, kein getrenntes L/R |
 | `spd_lvl` | print_speed |
 | `gcode` | G-code-Zeile (Sperre bei aktivem Druck) |
-| `lightToolHeadLogo` | X/P: M960; **H2D:** `ledctrl` `chamber_light2` (kein M960-Logo) |
+| `lightToolHeadLogo` | X/P: M960; **H2D:** `ledctrl` `chamber_light` (linke Leiste, kein Logo) |
 | `lightWorkHead` | **H2D:** `ledctrl` `work_light` mit Zeiten 0 (nicht Kammer-500 ms) |
 
 ### Kosmetik / Legacy
