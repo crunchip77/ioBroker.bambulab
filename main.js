@@ -385,6 +385,11 @@ class Bambulab extends utils.Adapter {
         return 'cloud-credentials.json';
     }
 
+    /** Persistenter Pfad: /opt/iobroker/iobroker-data/bambulab.0/cloud-credentials.json */
+    cloudCredentialsFilePath() {
+        return path.join(utils.getAbsoluteInstanceDataDir(this), this.cloudCredentialsFileName());
+    }
+
     /** Alte Fork-Version: Token lag im Adapter-Ordner und ging bei jedem Update verloren. */
     legacyCloudCredentialsFilePath() {
         return path.join(this.adapterDir, this.cloudCredentialsFileName());
@@ -423,21 +428,16 @@ class Bambulab extends utils.Adapter {
         if ((this.config.connectionMode || 'lan') !== 'cloud') {
             return;
         }
-        const name = this.cloudCredentialsFileName();
         try {
-            const stored = await this.readFileAsync(null, name);
-            const raw =
-                typeof stored.file === 'string' ? stored.file : stored.file.toString('utf8');
+            const raw = await fs.readFile(this.cloudCredentialsFilePath(), 'utf8');
             const cred = this.parseCloudCredentialsJson(raw);
             if (cred) {
                 this.applyCloudCredentialsToConfig(cred);
             }
             return;
         } catch (err) {
-            const msg = err && err.message ? String(err.message) : '';
-            const missing = err && (err.code === 'ENOENT' || /not found|does not exist/i.test(msg));
-            if (!missing) {
-                this.log.warn(`Cloud: Instanz-Zugangsdaten nicht lesbar: ${msg || err}`);
+            if (err && err.code !== 'ENOENT') {
+                this.log.warn(`Cloud: Instanz-Zugangsdaten nicht lesbar: ${err.message || err}`);
             }
         }
 
@@ -472,16 +472,18 @@ class Bambulab extends utils.Adapter {
             cloudUserId: cloudUserId != null ? String(cloudUserId).trim() : '',
             savedAt: Date.now(),
         };
-        await this.writeFileAsync(null, this.cloudCredentialsFileName(), JSON.stringify(payload));
+        await fs.writeFile(this.cloudCredentialsFilePath(), JSON.stringify(payload), {
+            encoding: 'utf8',
+            mode: 0o600,
+        });
     }
 
     async clearCloudCredentialsFile() {
         try {
-            await this.delFileAsync(null, this.cloudCredentialsFileName());
+            await fs.unlink(this.cloudCredentialsFilePath());
         } catch (err) {
-            const msg = err && err.message ? String(err.message) : '';
-            if (!/not found|does not exist/i.test(msg) && err && err.code !== 'ENOENT') {
-                this.log.warn(`Cloud: Instanz-Zugangsdaten nicht löschbar: ${msg || err}`);
+            if (err && err.code !== 'ENOENT') {
+                this.log.warn(`Cloud: Instanz-Zugangsdaten nicht löschbar: ${err.message || err}`);
             }
         }
         try {

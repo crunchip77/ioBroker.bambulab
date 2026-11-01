@@ -25,7 +25,7 @@ Danach Instanz **bambulab.0** neu starten (bei Cloud-Updates **kein** Token leer
 5. Log: `Printer connected` + `Token in lokaler Datei gespeichert`
 6. JWT liegt in **`iobroker-data/bambulab.0/cloud-credentials.json`** (Instanz-Datei, **nicht** unter `node_modules`) – Admin-Feld „Cloud access token“ bleibt oft leer (normal)
 
-**Kein neuer Code** bei Neustart oder **`iobroker url`**, solange diese Datei existiert (ab Fork **cloud.17**; ältere Builds speicherten fälschlich im Adapter-Ordner → Code nach jedem Update).
+**Kein neuer Code** bei Neustart oder **`iobroker url`**, solange diese Datei existiert (ab Fork **cloud.18**; ältere Builds speicherten im Adapter-Ordner oder nutzten die ioBroker-Datei-API falsch → Code nach jedem Update).
 
 **Nach dem Login:** einmal Code eintragen → speichern → warten bis Log „Printer connected“ **und** „Token in lokaler Datei gespeichert“ → danach reicht `iobroker url` ohne neue Mail. Beim **ersten** Start nach `url` kann kurz eine Mail kommen, wenn die Token-Datei noch fehlt (Upgrade von älterem Build).
 
