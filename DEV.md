@@ -85,7 +85,7 @@ Danach Instanz **bambulab.0** neu starten (bei Cloud-Updates **kein** Token leer
 | `pause`, `stop`, `resume` | MQTT print commands |
 | `lightChamber` | H2D: `chamber_light` + `chamber_light2` |
 | `lightWorkHead` | `ledctrl`: H2D **`heatbed_light`**, sonst `work_light` |
-| `big_fan1_speed`, `big_fan2_speed`, `cooling_fan_speed` | LAN: M106; **H2D Cloud:** `print.set_fan` (fan_index 2/3/1) |
+| `big_fan1_speed`, `big_fan2_speed`, `cooling_fan_speed` | LAN: M106 / **H2D:** `set_fan`; **Cloud** oft **blockiert** → `info.cloudPrintControlBlocked`, LAN-Modus in Admin |
 | `heatbreak_fan_speed` | **neu ab .15:** M106 P4 (manuell testen am H2D) |
 | `bed_target_temper`, `nozzle_target_temper` | M140 / M104 – **nur eine** Soll-Düse, kein getrenntes L/R |
 | `spd_lvl` | print_speed |

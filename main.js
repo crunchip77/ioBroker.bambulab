@@ -61,6 +61,13 @@ class Bambulab extends utils.Adapter {
         this.mqttPublishSeq = 0;
         /** H2D Luftkanal-Modus (0=Kühl) – vor M106-Lüftern ggf. set_airduct */
         this.h2dAirductModeCur = null;
+        /**
+         * Nach Schreibversuch: MQTT-Wert kurz nicht überschreiben (pushall setzt sonst sofort wieder 0).
+         * Schlüssel = control-State-Name, Wert = { val, until }.
+         */
+        this.controlWriteOverrides = {};
+        /** Cloud-H2D: print.gcode_line / set_fan liefern „failed“ (Firmware-Sperre) */
+        this.cloudPrintControlBlocked = false;
     }
 
     /**
@@ -77,6 +84,30 @@ class Bambulab extends utils.Adapter {
 
         // Reset the connection indicator during startup
         await this.setState('info.connection', false, true);
+        await this.setObjectNotExistsAsync('info.cloudPrintControlBlocked', {
+            type: 'state',
+            common: {
+                name: 'Cloud: Drucker lehnt print-Befehle ab (Lüfter/G-Code)',
+                type: 'boolean',
+                role: 'indicator.warning',
+                read: true,
+                write: false,
+                def: false,
+            },
+            native: {},
+        });
+        await this.setObjectNotExistsAsync('info.mqttPrintFun', {
+            type: 'state',
+            common: {
+                name: 'MQTT print.fun (Hex, Firmware-Flags)',
+                type: 'string',
+                role: 'text',
+                read: true,
+                write: false,
+                def: '',
+            },
+            native: {},
+        });
 
         // Download / Update HMS error Codes
         await this.loadHMSErrorCodeTranslations();
@@ -241,6 +272,10 @@ class Bambulab extends utils.Adapter {
             client.on('connect', () => {
                 if (!clientConnection.connected) {
                     this.log.info(`Printer connected successfully`);
+                }
+                if (mode !== 'cloud') {
+                    this.cloudPrintControlBlocked = false;
+                    this.setState('info.cloudPrintControlBlocked', false, true).catch(() => {});
                 }
                 this.setState('info.connection', true, true);
                 clientConnection.connected = true;
@@ -643,6 +678,7 @@ class Bambulab extends utils.Adapter {
             }
 
             if (message.print) {
+                this.updatePrintFunFlags(message.print);
                 const airduct = message.print.device && message.print.device.airduct;
                 if (airduct && airduct.modeCur != null && this.isH2dPrinter()) {
                     this.h2dAirductModeCur = airduct.modeCur;
@@ -719,6 +755,8 @@ class Bambulab extends utils.Adapter {
                 }
                 // lights_report → Schreib-States (Kammer + Werklicht)
                 this.syncLightsReportToControl(message.print);
+                // Nutzer-Sollwert behalten, bis Drucker nachzieht (sonst springt z. B. Lüfter sofort auf 0)
+                this.applyControlWriteOverrides(message.print);
 
                 // Translate HMS Code & write to state
                 const hmsError = [];
@@ -896,19 +934,97 @@ class Bambulab extends utils.Adapter {
         const sys = message.system;
         if (sys && sys.command === 'ledctrl') {
             const result = sys.result || sys.reason || sys.msg;
-            if (result != null && String(result).toUpperCase() !== 'SUCCESS') {
+            const resultStr = result != null ? String(result).toUpperCase() : '';
+            if (result != null && resultStr !== 'SUCCESS') {
                 this.log.warn(`LED ${sys.led_node || '?'}: ${result}`);
             }
-            // H2D: heatbed_light steht selten in lights_report – bei Erfolg den Schreib-State aktualisieren
             const workNode = this.workHeadLedNode();
-            if (sys.led_node === workNode && String(result).toUpperCase() === 'SUCCESS' && this.config.serial) {
-                const on = sys.led_mode === 'on' || sys.led_mode === 'flashing';
-                this.setState(`${this.config.serial}.control.lightWorkHead`, on, true).catch(() => {});
+            if (sys.led_node === workNode && this.config.serial) {
+                if (resultStr === 'SUCCESS') {
+                    const on = sys.led_mode === 'on' || sys.led_mode === 'flashing';
+                    this.setState(`${this.config.serial}.control.lightWorkHead`, on, true).catch(() => {});
+                } else if (this.isH2dPrinter() && sys.led_node === 'heatbed_light') {
+                    this.log.warn(
+                        'H2D heatbed_light: Drucker meldet fail – Licht kann trotzdem pulieren; Schalter-State bleibt per Override gesetzt.',
+                    );
+                }
             }
         }
         const pr = message.print;
         if (pr && pr.result != null && String(pr.result).toUpperCase() !== 'SUCCESS') {
             this.log.warn(`print.${pr.command || '?'}: ${pr.result}`);
+            if (pr.command === 'set_fan' || pr.command === 'gcode_line') {
+                this.markCloudPrintControlBlocked();
+            }
+        }
+    }
+
+    /** Firmware-Flag print.fun (Hex) – Bit 0x20000000 = Remote-G-Code/Lüfter oft gesperrt */
+    updatePrintFunFlags(print) {
+        if (!print || print.fun == null || print.fun === '') {
+            return;
+        }
+        const funHex = String(print.fun).trim();
+        this.setState('info.mqttPrintFun', funHex, true).catch(() => {});
+        const funInt = parseInt(funHex, 16);
+        if (Number.isNaN(funInt)) {
+            return;
+        }
+        if ((funInt & 0x20000000) !== 0) {
+            this.markCloudPrintControlBlocked();
+        }
+    }
+
+    markCloudPrintControlBlocked() {
+        if (this.cloudPrintControlBlocked) {
+            return;
+        }
+        this.cloudPrintControlBlocked = true;
+        this.setState('info.cloudPrintControlBlocked', true, true).catch(() => {});
+        this.log.warn(
+            'Cloud: Drucker lehnt print-Befehle ab (Lüfter/G-Code). H2D: in Bambu-App Entwicklermodus/LAN-Steuerung aktivieren oder Adapter auf LAN-Modus mit Access-Code umstellen.',
+        );
+    }
+
+    setControlWriteOverride(controlName, val, seconds = 45) {
+        this.controlWriteOverrides[controlName] = {
+            val,
+            until: Date.now() + seconds * 1000,
+        };
+    }
+
+    isControlWriteOverrideActive(controlName) {
+        const o = this.controlWriteOverrides[controlName];
+        if (!o) {
+            return false;
+        }
+        if (o.until <= Date.now()) {
+            delete this.controlWriteOverrides[controlName];
+            return false;
+        }
+        return true;
+    }
+
+    /** Schreib-States aus MQTT nur anwenden, wenn kein frischer Nutzer-Override aktiv ist */
+    applyControlWriteOverrides(print) {
+        if (!print || !print.control) {
+            return;
+        }
+        const fanKeys = [
+            'cooling_fan_speed',
+            'big_fan1_speed',
+            'big_fan2_speed',
+            'heatbreak_fan_speed',
+        ];
+        for (const key of fanKeys) {
+            if (this.isControlWriteOverrideActive(key)) {
+                const v = this.controlWriteOverrides[key].val;
+                print.control[key] = v;
+                print[key] = v;
+            }
+        }
+        if (this.isControlWriteOverrideActive('lightWorkHead')) {
+            print.control.lightWorkHead = !!this.controlWriteOverrides.lightWorkHead.val;
         }
     }
 
@@ -1026,10 +1142,9 @@ class Bambulab extends utils.Adapter {
         if (!this.isH2dPrinter()) {
             return;
         }
-        if (this.h2dAirductModeCur != null && this.h2dAirductModeCur !== 0) {
-            this.log.info(`H2D Luftkanal ${this.h2dAirductModeCur} → Kühlmodus (0) vor Lüfter-Befehl`);
-            this.publishMQTTmessages(this.buildSetAirductMessage(0));
-        }
+        // Kühlmodus vor Lüfter – auch bei modeCur 0 senden, falls Firmware sonst set_fan ablehnt
+        this.log.debug(`H2D set_airduct Kühlmodus (0) vor Lüfter`);
+        this.publishMQTTmessages(this.buildSetAirductMessage(0));
     }
 
     /** H2D Cloud: gcode_line schlägt oft fehl → Bambu-Studio-Protokoll set_fan (fan_index 1–3). */
@@ -1053,7 +1168,21 @@ class Bambulab extends utils.Adapter {
         return map[fanP] != null ? map[fanP] : fanP;
     }
 
-    publishFanSpeedCommand(fanP, percent, logLabel) {
+    publishFanSpeedCommand(fanP, percent, logLabel, controlStateName) {
+        if (controlStateName) {
+            this.setControlWriteOverride(controlStateName, Number(percent), 60);
+            if (this.config.serial) {
+                this.setState(`${this.config.serial}.control.${controlStateName}`, Number(percent), true).catch(
+                    () => {},
+                );
+            }
+        }
+        if ((this.config.connectionMode || 'lan') === 'cloud' && this.cloudPrintControlBlocked) {
+            this.log.warn(
+                `${logLabel}: übersprungen – Cloud-print-Befehle am H2D blockiert (siehe info.cloudPrintControlBlocked).`,
+            );
+            return;
+        }
         this.ensureH2dCoolingAirductForFans();
         if (this.isH2dPrinter()) {
             const fanIndex = this.fanPToSetFanIndex(fanP);
@@ -1123,14 +1252,16 @@ class Bambulab extends utils.Adapter {
      */
     buildWorkHeadLedCtrlMessage(turnOn) {
         const ledNode = this.workHeadLedNode();
+        // H2D heatbed_light: gleiche Zeiten wie Kammer-LED (0 ms führt oft zu fail/pulsieren)
+        const steadyChamberStyle = this.isH2dPrinter() && ledNode === 'heatbed_light';
         return {
             system: {
                 sequence_id: this.nextMqttSequenceId(),
                 command: 'ledctrl',
                 led_node: ledNode,
                 led_mode: turnOn ? 'on' : 'off',
-                led_on_time: 0,
-                led_off_time: 0,
+                led_on_time: steadyChamberStyle ? 500 : 0,
+                led_off_time: steadyChamberStyle ? 500 : 0,
                 loop_times: 0,
                 interval_time: 0,
             },
@@ -1139,6 +1270,10 @@ class Bambulab extends utils.Adapter {
 
     publishWorkHeadLightCommand(turnOn) {
         const ledNode = this.workHeadLedNode();
+        this.setControlWriteOverride('lightWorkHead', turnOn, 30);
+        if (this.config.serial) {
+            this.setState(`${this.config.serial}.control.lightWorkHead`, turnOn, true).catch(() => {});
+        }
         this.log.info(`Werklicht (${ledNode}) → ${turnOn ? 'an' : 'aus'}`);
         this.publishMQTTmessages(this.buildWorkHeadLedCtrlMessage(turnOn));
     }
@@ -1173,12 +1308,15 @@ class Bambulab extends utils.Adapter {
             }
         }
 
+        if (this.isControlWriteOverrideActive('lightWorkHead')) {
+            print.control.lightWorkHead = !!this.controlWriteOverrides.lightWorkHead.val;
+        }
         const workNode = this.workHeadLedNode();
         const workLight = print.lights_report.find(entry => entry && entry.node === workNode);
-        if (workLight) {
+        if (workLight && !this.isControlWriteOverrideActive('lightWorkHead')) {
             print.control.lightWorkHead = workLight.mode === 'on' || workLight.mode === 'flashing';
             workLight.mode = workLight.mode === 'on' || workLight.mode === 'flashing';
-        } else if (this.isH2dPrinter()) {
+        } else if (this.isH2dPrinter() && !this.isControlWriteOverrideActive('lightWorkHead')) {
             // Fallback X1-Knoten, falls Firmware doch work_light meldet
             const legacy = print.lights_report.find(entry => entry && entry.node === 'work_light');
             if (legacy) {
@@ -1606,7 +1744,7 @@ class Bambulab extends utils.Adapter {
                         };
                         break;
                     case 'fanSpeedChamber':
-                        this.publishFanSpeedCommand(3, state.val, 'Lüfter Kammer (fanSpeedChamber)');
+                        this.publishFanSpeedCommand(3, state.val, 'Lüfter Kammer (fanSpeedChamber)', 'big_fan2_speed');
                         return;
                     case 'heatbreak_fan_speed':
                         if (this.isH2dPrinter()) {
@@ -1615,7 +1753,7 @@ class Bambulab extends utils.Adapter {
                             );
                             return;
                         }
-                        this.publishFanSpeedCommand(4, state.val, 'Lüfter Heatbreak');
+                        this.publishFanSpeedCommand(4, state.val, 'Lüfter Heatbreak', 'heatbreak_fan_speed');
                         return;
                     case 'spd_lvl':
                         msg = this.buildPrintCommand({
@@ -1643,13 +1781,13 @@ class Bambulab extends utils.Adapter {
                         };
                         break;
                     case 'big_fan1_speed':
-                        this.publishFanSpeedCommand(2, state.val, 'Lüfter AUX (big_fan1)');
+                        this.publishFanSpeedCommand(2, state.val, 'Lüfter AUX (big_fan1)', 'big_fan1_speed');
                         return;
                     case 'big_fan2_speed':
-                        this.publishFanSpeedCommand(3, state.val, 'Lüfter Kammer (big_fan2)');
+                        this.publishFanSpeedCommand(3, state.val, 'Lüfter Kammer (big_fan2)', 'big_fan2_speed');
                         return;
                     case 'cooling_fan_speed':
-                        this.publishFanSpeedCommand(1, state.val, 'Part-Cooling-Lüfter');
+                        this.publishFanSpeedCommand(1, state.val, 'Part-Cooling-Lüfter', 'cooling_fan_speed');
                         return;
                     case 'homing':
                         // Block homing (G28) command during active printing/working state
