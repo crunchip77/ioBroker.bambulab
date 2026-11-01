@@ -929,6 +929,61 @@ class Bambulab extends utils.Adapter {
         return /^H2D/i.test(this.config.printerModel || '');
     }
 
+    isH2dPrinter() {
+        return /^H2D/i.test(this.config.printerModel || '');
+    }
+
+    /** Lüfter-Sollwert ioBroker (0–100 %) → G-code S0–255 */
+    fanSpeedPercentToS(percent) {
+        const p = Number(percent);
+        if (Number.isNaN(p)) {
+            return 0;
+        }
+        return Math.round(Math.max(0, Math.min(100, p)) * 2.55);
+    }
+
+    /**
+     * M106-Lüftersteuerung; H2D: Hilfs-/Kammer-Lüfter (P2/P3) brauchen oft M145 P0 (Kühl-Luftkanal).
+     */
+    buildFanSpeedGcode(fanP, percent) {
+        const s = this.fanSpeedPercentToS(percent);
+        let param = '';
+        if (this.isH2dPrinter() && (fanP === 2 || fanP === 3)) {
+            param += 'M145 P0 \n';
+        }
+        param += `M106 P${fanP} S${s} \n`;
+        return param;
+    }
+
+    /** State-Name aus …control.<name> (Serial-Ordner oder Instanz-control). */
+    resolveControlStateName(checkID) {
+        const idx = checkID.indexOf('control');
+        if (idx === -1 || idx >= checkID.length - 1) {
+            return null;
+        }
+        return checkID[idx + 1];
+    }
+
+    /** jsonExplorer legt Lüfter-States an – explizit subscriben, sonst kein onStateChange. */
+    async subscribeWritablePrintControls() {
+        const serial = (this.config.serial || '').trim();
+        if (!serial) {
+            return;
+        }
+        const names = [
+            'cooling_fan_speed',
+            'heatbreak_fan_speed',
+            'big_fan1_speed',
+            'big_fan2_speed',
+            'spd_lvl',
+            'bed_target_temper',
+            'nozzle_target_temper',
+        ];
+        for (const name of names) {
+            await this.subscribeStatesAsync(`${serial}.control.${name}`);
+        }
+    }
+
     chamberLightLedNodes() {
         return this.usesDualChamberLights() ? ['chamber_light', 'chamber_light2'] : ['chamber_light'];
     }
@@ -1129,6 +1184,10 @@ class Bambulab extends utils.Adapter {
                 common: hmstates[state],
             });
         }
+
+        this.subscribeWritablePrintControls().catch(err => {
+            this.log.warn(`Subscribe Lüfter/Speed-States: ${err.message || err}`);
+        });
     }
 
     async loadHMSErrorCodeTranslations() {
@@ -1310,8 +1369,9 @@ class Bambulab extends utils.Adapter {
                 if (checkID[3] === 'control') {
                     stateLocation = 4;
                 }
+                const controlState = this.resolveControlStateName(checkID) || checkID[stateLocation];
 
-                switch (checkID[stateLocation]) {
+                switch (controlState) {
                     case 'cloudRequestEmailCode':
                         if (state.val) {
                             await this.forceCloudEmailCodeRequest();
@@ -1399,7 +1459,7 @@ class Bambulab extends utils.Adapter {
                         msg = {
                             print: {
                                 command: 'gcode_line',
-                                param: `M106 P3 S${state.val * 2.55} \n`,
+                                param: this.buildFanSpeedGcode(3, state.val),
                                 sequence_id: '0',
                             },
                         };
@@ -1408,19 +1468,21 @@ class Bambulab extends utils.Adapter {
                         msg = {
                             print: {
                                 command: 'gcode_line',
-                                param: `M106 P4 S${state.val * 2.55} \n`,
+                                param: this.buildFanSpeedGcode(4, state.val),
                                 sequence_id: '0',
                             },
                         };
+                        this.log.info(`Lüfter Heatbreak → ${state.val}% (M106 P4)`);
                         break;
                     case 'spd_lvl':
                         msg = {
                             print: {
                                 command: 'print_speed',
-                                param: `${state.val} \n`,
+                                param: String(state.val),
                                 sequence_id: '0',
                             },
                         };
+                        this.log.info(`Druck-Speed-Profil → Stufe ${state.val} (print_speed)`);
                         break;
                     case 'bed_target_temper':
                         msg = {
@@ -1444,28 +1506,31 @@ class Bambulab extends utils.Adapter {
                         msg = {
                             print: {
                                 command: 'gcode_line',
-                                param: `M106 P2 S${state.val * 2.55} \n`,
+                                param: this.buildFanSpeedGcode(2, state.val),
                                 sequence_id: '0',
                             },
                         };
+                        this.log.info(`Lüfter AUX (big_fan1) → ${state.val}% (M106 P2)`);
                         break;
                     case 'big_fan2_speed':
                         msg = {
                             print: {
                                 command: 'gcode_line',
-                                param: `M106 P3 S${state.val * 2.55} \n`,
+                                param: this.buildFanSpeedGcode(3, state.val),
                                 sequence_id: '0',
                             },
                         };
+                        this.log.info(`Lüfter Kammer (big_fan2) → ${state.val}% (M106 P3)`);
                         break;
                     case 'cooling_fan_speed':
                         msg = {
                             print: {
                                 command: 'gcode_line',
-                                param: `M106 P1 S${state.val * 2.55} \n`,
+                                param: this.buildFanSpeedGcode(1, state.val),
                                 sequence_id: '0',
                             },
                         };
+                        this.log.info(`Part-Cooling-Lüfter → ${state.val}% (M106 P1)`);
                         break;
                     case 'homing':
                         // Block homing (G28) command during active printing/working state
