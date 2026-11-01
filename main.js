@@ -981,8 +981,9 @@ class Bambulab extends utils.Adapter {
         }
         this.cloudPrintControlBlocked = true;
         this.setState('info.cloudPrintControlBlocked', true, true).catch(() => {});
-        this.log.warn(
-            'Cloud: Drucker lehnt print-Befehle ab (Lüfter, G-Code, oft Soll-Temperatur). Das ist Firmware-Policy (vgl. ha-bambulab #1330), kein Adapter-Fehler. Volle Steuerung: connectionMode=lan, Drucker-IP + LAN Access Code (Drucker im LAN-Modus). State: info.cloudPrintControlBlocked.',
+        // Einmalig info (kein warn): erwarteter Zustand an Cloud-H2D, kein Fehler
+        this.log.info(
+            'Cloud-H2D: Remote-print-Befehle (Lüfter/G-Code) sind firmwareseitig gesperrt → info.cloudPrintControlBlocked=true. Volle Steuerung nur per LAN (Drucker-IP + Access Code).',
         );
     }
 
@@ -1333,7 +1334,12 @@ class Bambulab extends utils.Adapter {
             (msg.print && `${msg.print.command}${msg.print.param ? '' : ''}`) ||
             msg.pushing?.command ||
             'mqtt';
-        this.log.info(`MQTT → ${brief}`);
+        // pushall läuft am H2D alle requestInterval-Sekunden – nur debug, sonst Log-Flut
+        if (brief === 'pushall') {
+            this.log.debug(`MQTT → ${brief}`);
+        } else {
+            this.log.info(`MQTT → ${brief}`);
+        }
         this.log.debug(`Publish message ${JSON.stringify(msg)}`);
 
         const topic = `device/${this.config.serial}/request`;
