@@ -380,36 +380,87 @@ class Bambulab extends utils.Adapter {
         Object.assign(this.config, patch);
     }
 
-    /** Pfad zur lokalen Cloud-JWT-Datei (nicht über encryptedNative – sonst „Not authorized“ nach Neustart). */
-    cloudCredentialsFilePath() {
-        return path.join(this.adapterDir, 'cloud-credentials.json');
+    /** Dateiname in iobroker-data/<instanz>/ – überlebt `iobroker url` (nicht node_modules). */
+    cloudCredentialsFileName() {
+        return 'cloud-credentials.json';
+    }
+
+    /** Alte Fork-Version: Token lag im Adapter-Ordner und ging bei jedem Update verloren. */
+    legacyCloudCredentialsFilePath() {
+        return path.join(this.adapterDir, this.cloudCredentialsFileName());
+    }
+
+    parseCloudCredentialsJson(raw) {
+        const cred = JSON.parse(raw);
+        const token = (cred.accessToken || '').trim();
+        if (!token) {
+            return null;
+        }
+        return {
+            accessToken: token,
+            cloudMqttUsername: cred.cloudMqttUsername
+                ? String(cred.cloudMqttUsername).trim()
+                : '',
+            cloudUserId: cred.cloudUserId != null ? String(cred.cloudUserId).trim() : '',
+        };
+    }
+
+    applyCloudCredentialsToConfig(cred) {
+        this.config.cloudAccessToken = cred.accessToken;
+        if (cred.cloudMqttUsername) {
+            this.config.cloudMqttUsername = cred.cloudMqttUsername;
+        }
+        if (cred.cloudUserId) {
+            this.config.cloudUserId = cred.cloudUserId;
+        }
+        this.log.debug(`Cloud: Zugangsdaten aus Datei (Token-Länge ${cred.accessToken.length}).`);
     }
 
     /**
-     * JWT + MQTT-User aus Datei laden (hat Vorrang vor Native cloudAccessToken).
+     * JWT + MQTT-User aus Instanz-Datei laden (hat Vorrang vor Native cloudAccessToken).
      */
     async loadCloudCredentialsFromFile() {
         if ((this.config.connectionMode || 'lan') !== 'cloud') {
             return;
         }
+        const name = this.cloudCredentialsFileName();
         try {
-            const raw = await fs.readFile(this.cloudCredentialsFilePath(), 'utf8');
-            const cred = JSON.parse(raw);
-            const token = (cred.accessToken || '').trim();
-            if (!token) {
+            const stored = await this.readFileAsync(null, name);
+            const raw =
+                typeof stored.file === 'string' ? stored.file : stored.file.toString('utf8');
+            const cred = this.parseCloudCredentialsJson(raw);
+            if (cred) {
+                this.applyCloudCredentialsToConfig(cred);
+            }
+            return;
+        } catch (err) {
+            const msg = err && err.message ? String(err.message) : '';
+            const missing = err && (err.code === 'ENOENT' || /not found|does not exist/i.test(msg));
+            if (!missing) {
+                this.log.warn(`Cloud: Instanz-Zugangsdaten nicht lesbar: ${msg || err}`);
+            }
+        }
+
+        // Migration: einmalig aus altem Pfad unter node_modules/iobroker.bambulab/
+        try {
+            const raw = await fs.readFile(this.legacyCloudCredentialsFilePath(), 'utf8');
+            const cred = this.parseCloudCredentialsJson(raw);
+            if (!cred) {
                 return;
             }
-            this.config.cloudAccessToken = token;
-            if (cred.cloudMqttUsername) {
-                this.config.cloudMqttUsername = String(cred.cloudMqttUsername).trim();
+            await this.writeCloudCredentialsFile(cred);
+            this.applyCloudCredentialsToConfig(cred);
+            this.log.info(
+                'Cloud: Token aus altem Adapter-Ordner nach iobroker-data verschoben – künftig kein E-Mail-Code mehr nach `iobroker url`.',
+            );
+            try {
+                await fs.unlink(this.legacyCloudCredentialsFilePath());
+            } catch {
+                // ignore
             }
-            if (cred.cloudUserId != null && String(cred.cloudUserId).trim() !== '') {
-                this.config.cloudUserId = String(cred.cloudUserId).trim();
-            }
-            this.log.debug(`Cloud: Zugangsdaten aus lokaler Datei (Token-Länge ${token.length}).`);
         } catch (err) {
             if (err && err.code !== 'ENOENT') {
-                this.log.warn(`Cloud: Lokale Zugangsdaten nicht lesbar: ${err.message || err}`);
+                this.log.debug(`Cloud: Keine Legacy-Zugangsdaten: ${err.message || err}`);
             }
         }
     }
@@ -421,19 +472,22 @@ class Bambulab extends utils.Adapter {
             cloudUserId: cloudUserId != null ? String(cloudUserId).trim() : '',
             savedAt: Date.now(),
         };
-        await fs.writeFile(this.cloudCredentialsFilePath(), JSON.stringify(payload), {
-            encoding: 'utf8',
-            mode: 0o600,
-        });
+        await this.writeFileAsync(null, this.cloudCredentialsFileName(), JSON.stringify(payload));
     }
 
     async clearCloudCredentialsFile() {
         try {
-            await fs.unlink(this.cloudCredentialsFilePath());
+            await this.delFileAsync(null, this.cloudCredentialsFileName());
         } catch (err) {
-            if (err && err.code !== 'ENOENT') {
-                this.log.warn(`Cloud: Lokale Zugangsdaten nicht löschbar: ${err.message || err}`);
+            const msg = err && err.message ? String(err.message) : '';
+            if (!/not found|does not exist/i.test(msg) && err && err.code !== 'ENOENT') {
+                this.log.warn(`Cloud: Instanz-Zugangsdaten nicht löschbar: ${msg || err}`);
             }
+        }
+        try {
+            await fs.unlink(this.legacyCloudCredentialsFilePath());
+        } catch {
+            // ignore
         }
     }
 
